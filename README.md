@@ -3,7 +3,7 @@
 
 A web-based geotechnical engineering platform for foundation design of a G+3 student hostel in Mandi, Himachal Pradesh (Seismic Zone V).
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://your-app-name.streamlit.app)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://github.com/9Vaibhav8/GeoTech-Platform.git)
 
 ---
 
@@ -48,7 +48,7 @@ pip install -r requirements.txt
 streamlit run Home.py
 ```
 
-The app opens at **http://localhost:8501** in your browser.
+The app opens at **[http://localhost:8501](https://github.com/9Vaibhav8/GeoTech-Platform.git)** in your browser.
 
 ---
 
@@ -73,20 +73,6 @@ geotech-platform/
 ├── .streamlit/config.toml           # Theme & server config
 └── README.md
 ```
-
----
-
-## Deployment to Streamlit Cloud
-
-1. Push this repository to GitHub (make sure it is **public** or you have Streamlit Cloud access to private repos)
-2. Go to **[share.streamlit.io](https://share.streamlit.io)** → "New app"
-3. Connect your GitHub account and select:
-   - **Repository:** `<your-username>/geotech-platform`
-   - **Branch:** `main`
-   - **Main file:** `Home.py`
-4. Click **Deploy** — the app gets a permanent URL like `https://geotech-platform.streamlit.app`
-
-> Every `git push` to `main` triggers an automatic redeploy.
 
 ---
 
