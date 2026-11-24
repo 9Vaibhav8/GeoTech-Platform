@@ -3,7 +3,7 @@
 
 A web-based geotechnical engineering platform for foundation design of a G+3 student hostel in Mandi, Himachal Pradesh (Seismic Zone V).
 
-[![Streamlit App](https://geotech-platformgit-5hgqwskkbpyo8z2zykgfiq.streamlit.app/)
+URL - https://geotech-platformgit-5hgqwskkbpyo8z2zykgfiq.streamlit.app/
 
 ---
 
