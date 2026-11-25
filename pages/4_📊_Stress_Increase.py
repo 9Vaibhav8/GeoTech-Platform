@@ -97,7 +97,19 @@ for m in methods_to_plot:
     _, ds = stress_profile(q_net, B, L, z_max, method=m, n_points=n_pts)
     traces_data[m] = ds
 
-eff_stress = effective_stress_profile(layers, wt, z_arr, Df=Df)
+profile_bottom = max(float(lyr["depth_bot"]) for lyr in layers)
+valid_eff_stress = (z_arr + Df) <= profile_bottom
+eff_stress = np.full(z_arr.shape, np.nan, dtype=float)
+if np.any(valid_eff_stress):
+    eff_stress[valid_eff_stress] = effective_stress_profile(
+        layers, wt, z_arr[valid_eff_stress], Df=Df
+    )
+if not np.all(valid_eff_stress):
+    st.info(
+        f"The soil profile ends at {profile_bottom:.2f} m below ground. "
+        "Stress increase is plotted to the selected depth; effective stress "
+        "is shown only within the entered profile."
+    )
 
 # Influence depth (Boussinesq centre)
 z_inf = influence_depth(q_net, B, L, threshold=0.1,
@@ -180,7 +192,11 @@ for z in z_table:
     ds_centre = stress_increase_centre(q_net, B, L, z)
     ds_corner = boussinesq_corner(q_net, B, L, z)
     ds_21 = stress_increase_2to1(q_net, B, L, z)
-    sv0 = effective_stress_profile(layers, wt, np.array([z]), Df=Df)[0]
+    sv0 = (
+        effective_stress_profile(layers, wt, np.array([z]), Df=Df)[0]
+        if z + Df <= profile_bottom
+        else np.nan
+    )
     rows.append({
         "Depth below footing  z (m)": round(float(z), 2),
         "Δσz — Centre (kPa)": round(float(ds_centre), 2),
