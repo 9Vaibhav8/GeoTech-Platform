@@ -312,7 +312,7 @@ def color_status(val):
         return "background-color: #f8d7da; color: #721c24;"
     return ""
 
-styled_df = sizing_df.style.applymap(color_status, subset=["Status"])
+styled_df = sizing_df.style.map(color_status, subset=["Status"])
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------------------------
