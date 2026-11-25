@@ -19,6 +19,7 @@ from utils.constants import init_session_state
 from utils.stress_increase import (
     stress_increase_centre,
     boussinesq_corner,
+    stress_increase_point,
     stress_increase_2to1,
     stress_profile,
     influence_depth,
@@ -100,7 +101,7 @@ eff_stress = effective_stress_profile(layers, wt, z_arr, Df=Df)
 
 # Influence depth (Boussinesq centre)
 z_inf = influence_depth(q_net, B, L, threshold=0.1,
-                        method="boussinesq_centre", n_points=500)
+                        method="boussinesq_centre")
 
 # ── Figure ─────────────────────────────────────────────────────────────────
 colour_map = {
@@ -195,8 +196,9 @@ st.dataframe(df_table, use_container_width=True, hide_index=True)
 # ── Superposition tool ─────────────────────────────────────────────────────
 with st.expander("🔀 Superposition Tool — multiple loaded areas"):
     st.write(
-        "Add several footings (each with its own B, L, q, and horizontal offsets "
-        "from a reference point) and sum their stress contributions at any depth."
+        "Add several footings (each with its own B, L, q, and plan offsets). "
+        "The offsets locate each footing's near corner from the observation point "
+        "at (0, 0); the tool sums the stress at that point."
     )
     if "superpos_areas" not in st.session_state:
         st.session_state.superpos_areas = [
@@ -213,9 +215,9 @@ with st.expander("🔀 Superposition Tool — multiple loaded areas"):
                                     min_value=0.1, key=f"sp_L_{idx}")
         area["q"] = c3.number_input(f"q{idx+1} (kPa)", value=area["q"],
                                     min_value=0.1, key=f"sp_q_{idx}")
-        area["xoff"] = c4.number_input(f"x-offset{idx+1} (m)", value=area["xoff"],
+        area["xoff"] = c4.number_input(f"Near-corner x{idx+1} (m)", value=area["xoff"],
                                        key=f"sp_xoff_{idx}")
-        area["yoff"] = c5.number_input(f"y-offset{idx+1} (m)", value=area["yoff"],
+        area["yoff"] = c5.number_input(f"Near-corner y{idx+1} (m)", value=area["yoff"],
                                        key=f"sp_yoff_{idx}")
         if c6.button("✕", key=f"sp_del_{idx}"):
             to_delete = idx
@@ -233,8 +235,11 @@ with st.expander("🔀 Superposition Tool — multiple loaded areas"):
     ds_total = np.zeros_like(z_sp)
     for area in sp_areas:
         for i, z in enumerate(z_sp):
-            # treat each footing as contributing at its own corners relative to point
-            ds_total[i] += stress_increase_centre(area["q"], area["B"], area["L"], z)
+            # Offsets locate the near corner relative to observation point (0, 0).
+            ds_total[i] += stress_increase_point(
+                area["q"], area["B"], area["L"],
+                -area["xoff"], -area["yoff"], z,
+            )
 
     fig_sp = go.Figure()
     fig_sp.add_trace(go.Scatter(
