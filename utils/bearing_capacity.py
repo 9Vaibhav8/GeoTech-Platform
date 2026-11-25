@@ -101,42 +101,24 @@ def shape_factors(B: float, L: float, phi_deg: float):
 
 def depth_factors(Df: float, B: float, phi_deg: float):
     """
-    IS 6403:1981 Cl. 5.1 — Depth factors dc, dq, dγ.
+    IS 6403:1981 Cl. 5.1.2.1 — Depth factors dc, dq, dγ.
 
-    For φ > 10°:
-        Kp = tan²(45 + φ/2)
-        dc  = 1 + 0.2 · √Kp · (Df/B)
-        dq  = dγ = 1 + 0.1 · √Kp · (Df/B)
-    For φ ≤ 10°:
-        dc  = 1 + 0.2 · (Df/B)
-        dq  = dγ = 1.0
-
-    Parameters
-    ----------
-    Df : float
-        Founding depth (m).
-    B : float
-        Footing width (m).
-    phi_deg : float
-        Friction angle (degrees).
-
-    Returns
-    -------
-    (dc, dq, dgamma) : tuple of float
+    √Nφ = tan(45° + φ/2)
+    dc  = 1 + 0.2 · √Nφ · (Df/B)         for all φ
+    dq  = dγ = 1 + 0.1 · √Nφ · (Df/B)    for φ > 10°
+    dq  = dγ = 1.0                        for φ ≤ 10°
     """
     if B <= 0:
         return 1.0, 1.0, 1.0
 
     ratio = Df / B
+    sqrtKp = np.tan(np.radians(45.0 + phi_deg / 2.0))
+    dc = 1.0 + 0.2 * sqrtKp * ratio
 
     if phi_deg > 10.0:
-        Kp = np.tan(np.radians(45.0 + phi_deg / 2.0)) ** 2
-        sqrtKp = np.sqrt(Kp)
-        dc = 1.0 + 0.2 * sqrtKp * ratio
         dq = 1.0 + 0.1 * sqrtKp * ratio
-        dgamma = 1.0 + 0.1 * sqrtKp * ratio
+        dgamma = dq
     else:
-        dc = 1.0 + 0.2 * ratio
         dq = 1.0
         dgamma = 1.0
 
@@ -148,30 +130,13 @@ def depth_factors(Df: float, B: float, phi_deg: float):
 # ---------------------------------------------------------------------------
 
 def inclination_factors(alpha_deg: float, phi_deg: float):
-    """
-    IS 6403:1981 Cl. 5.1 — Inclination factors ic, iq, iγ.
+    if not (0.0 <= alpha_deg <= 90.0):
+        raise ValueError(f"Load inclination alpha_deg must be in [0, 90], got {alpha_deg}")
+    if phi_deg < 0.0:
+        raise ValueError(f"Friction angle phi_deg must be non-negative, got {phi_deg}")
 
-    alpha = inclination of the resultant load from vertical (degrees).
-
-    ic = iq = (1 - alpha/90)²
-    iγ      = (1 - alpha/φ)²    if φ > 0
-              0.0                 if φ = 0 and alpha > 0
-
-    For vertical load (alpha = 0): ic = iq = iγ = 1.0
-
-    Parameters
-    ----------
-    alpha_deg : float
-        Inclination of resultant load from vertical (degrees, 0–90).
-    phi_deg : float
-        Friction angle (degrees).
-
-    Returns
-    -------
-    (ic, iq, igamma) : tuple of float
-    """
     ic = (1.0 - alpha_deg / 90.0) ** 2
-    iq = ic  # same per IS 6403:1981 Cl. 5.1
+    iq = ic
 
     if phi_deg > 0.0:
         igamma = (1.0 - alpha_deg / phi_deg) ** 2 if alpha_deg < phi_deg else 0.0
