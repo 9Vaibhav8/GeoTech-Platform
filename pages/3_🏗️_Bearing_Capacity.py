@@ -1,27 +1,30 @@
 """
 pages/3_🏗️_Bearing_Capacity.py
-IS 6403:1981 — Bearing Capacity of Shallow Foundations
+P3 — Bearing Capacity of Shallow Foundations (Strict IS 6403:1981 Compliance)
 IIT Mandi CE 402 Geotechnical Engineering Platform
+
+Design Principle (SRP):
+  Handles strictly Streamlit layout and widget binding; all geotechnical
+  computations reside in `utils/bearing_capacity.py` and all Plotly charts /
+  formatted tables reside in `utils/bearing_capacity_presenter.py`.
 """
 
-import numpy as np
+from __future__ import annotations
+
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
-from utils.constants import init_session_state
 from utils.bearing_capacity import (
-    bearing_capacity_factors,
-    net_ultimate_bearing_capacity,
-    net_safe_bearing_capacity,
-    water_table_factor,
-    effective_area,
-    required_footing_size,
-    GAMMA_W,
+    FootingSpec,
+    IS6403Solver,
+    SoilFoundingState,
+    compute_effective_overburden,
 )
+from utils.bearing_capacity_presenter import BearingCapacityPresenter
+from utils.constants import init_session_state
 
 # ---------------------------------------------------------------------------
-# Page config & session state
+# Page Config & Session State
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="P3 · Bearing Capacity — IS 6403:1981",
@@ -30,35 +33,35 @@ st.set_page_config(
 )
 init_session_state()
 
+SOLVER = IS6403Solver()
+PRESENTER = BearingCapacityPresenter()
+
 st.title("🏗️ P3 — Bearing Capacity (IS 6403:1981)")
-st.caption("Shallow foundation design per IS 6403:1981 | IIT Mandi CE 402")
+st.caption("Shallow foundation design strictly per IS 6403:1981 | SI units (kN, kPa, m, °)")
 
-# ---------------------------------------------------------------------------
-# Helper: detect layer containing a given depth
-# ---------------------------------------------------------------------------
 
-def get_layer_at_depth(depth_m: float):
-    """Return the layer dict that contains depth_m (m bgl)."""
+def get_layer_at_depth(depth_m: float) -> dict | None:
+    """Return the session-state layer dict containing depth_m (m bgl)."""
     layers = st.session_state.get("layers", [])
     for lyr in layers:
-        if lyr["depth_top"] <= depth_m <= lyr["depth_bot"]:
+        if lyr["depth_top"] <= depth_m < lyr["depth_bot"]:
             return lyr
-    # If depth below all layers, return the last layer
-    if layers:
-        return layers[-1]
-    return None
+    return layers[-1] if layers else None
 
 
 # ---------------------------------------------------------------------------
-# SIDEBAR — Section A: Footing Parameters
+# SIDEBAR — Section A: Footing & Loading Parameters
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Footing Parameters")
 
     Df = st.number_input(
-        "Founding depth Df (m)", min_value=0.3, max_value=10.0,
-        value=1.5, step=0.1,
-        help="Depth of footing base below ground level (m bgl).",
+        "Founding depth Df (m bgl)",
+        min_value=0.0,
+        max_value=15.0,
+        value=1.5,
+        step=0.1,
+        help="Depth of footing base below existing ground level (m).",
     )
 
     shape_opts = ["Square", "Rectangular", "Circular", "Strip"]
@@ -68,378 +71,333 @@ with st.sidebar:
     if footing_shape == "rectangular":
         col_b, col_l = st.columns(2)
         with col_b:
-            B_input = st.number_input("Width B (m)", min_value=0.3, max_value=20.0, value=1.5, step=0.1)
+            B_sidebar = st.number_input(
+                "Width B (m)", min_value=0.2, max_value=30.0, value=2.0, step=0.1
+            )
         with col_l:
-            L_input = st.number_input("Length L (m)", min_value=0.3, max_value=40.0, value=2.0, step=0.1)
-        B_sidebar, L_sidebar = B_input, L_input
+            L_sidebar = st.number_input(
+                "Length L (m)", min_value=0.2, max_value=50.0, value=2.5, step=0.1
+            )
     elif footing_shape == "strip":
-        B_sidebar = st.number_input("Width B (m)", min_value=0.3, max_value=10.0, value=1.0, step=0.1)
-        L_sidebar = 1e6
-    else:
         B_sidebar = st.number_input(
-            "Width / Diameter B (m)", min_value=0.3, max_value=20.0, value=1.5, step=0.1
+            "Width B (m)", min_value=0.2, max_value=20.0, value=1.5, step=0.1
+        )
+        L_sidebar = 1.0e6
+    else:
+        dim_label = "Diameter B (m)" if footing_shape == "circular" else "Width B = L (m)"
+        B_sidebar = st.number_input(
+            dim_label, min_value=0.2, max_value=30.0, value=2.0, step=0.1
         )
         L_sidebar = B_sidebar
 
     failure_mode_label = st.radio(
-        "Failure mode",
+        "Shear failure mode",
         ["General shear", "Local shear"],
-        help="IS 6403:1981 Cl. 5.3 — Use local shear for loose/soft soils.",
+        help="IS 6403:1981 Cl. 5.1.2 (General) vs. Cl. 5.1.2.2 (Local shear reduction).",
     )
     failure_mode = "general" if failure_mode_label == "General shear" else "local"
 
     alpha_deg = st.number_input(
-        "Load inclination α (°)", min_value=0.0, max_value=45.0, value=0.0, step=1.0,
-        help="IS 6403:1981 Cl. 5.1 — Angle of resultant load from vertical.",
+        "Load inclination α (°)",
+        min_value=0.0,
+        max_value=45.0,
+        value=0.0,
+        step=1.0,
+        help="IS 6403:1981 Cl. 5.1.2.1 — Angle of resultant load from vertical (°).",
     )
 
     FOS = st.number_input(
-        "Factor of Safety (FOS)", min_value=1.0, max_value=10.0, value=3.0, step=0.5,
-        help="IS 6403:1981 Cl. 6 recommends FOS ≥ 3.0 for gross capacity.",
+        "Factor of Safety FOS (—)",
+        min_value=1.0,
+        max_value=10.0,
+        value=3.0,
+        step=0.5,
+        help="IS 6403:1981 Cl. 6 — Factor of safety applied to net ultimate capacity qnu.",
     )
 
     st.divider()
-    st.subheader("📐 Eccentric Loading")
-    show_eccentric = footing_shape == "rectangular"
-    if show_eccentric:
-        ex_input = st.number_input("Eccentricity ex along B (m)", min_value=0.0, value=0.0, step=0.01)
-        ey_input = st.number_input("Eccentricity ey along L (m)", min_value=0.0, value=0.0, step=0.01)
+    st.subheader("📐 Eccentric Loading (Cl. 5.4)")
+    supports_eccentric = footing_shape in ("square", "rectangular")
+    if supports_eccentric:
+        ex_input = st.number_input(
+            "Eccentricity ex along B (m)", min_value=0.0, value=0.0, step=0.01, format="%.3f"
+        )
+        ey_input = st.number_input(
+            "Eccentricity ey along L (m)", min_value=0.0, value=0.0, step=0.01, format="%.3f"
+        )
     else:
         ex_input, ey_input = 0.0, 0.0
-        st.info("Eccentric loading available for Rectangular footings.")
+        st.info("Biaxial eccentricity applies to Square and Rectangular footings.")
 
     st.divider()
-    wt_bgl_sidebar = st.session_state.get("wt_design_bgl", 2.0)
-    wt_display = st.number_input(
-        "Design WT depth (m bgl)", min_value=0.0, max_value=50.0,
-        value=float(wt_bgl_sidebar), step=0.1,
-        help="Water table depth used for bearing capacity; override session value here.",
+    wt_bgl_session = float(st.session_state.get("wt_design_bgl", 1.0))
+    wt_bgl = st.number_input(
+        "Design WT depth (m bgl)",
+        min_value=0.0,
+        max_value=50.0,
+        value=wt_bgl_session,
+        step=0.1,
+        help="Highest seasonal water-table depth for design (m bgl).",
     )
-    wt_bgl = wt_display
 
 # ---------------------------------------------------------------------------
-# SECTION B — Soil Parameters at Founding Level
+# SECTION B — Soil Parameters & Multi-layer Overburden at Founding Level
 # ---------------------------------------------------------------------------
-st.header("🪨 Section B — Soil Parameters at Founding Level")
+st.header("🪨 Section B — Soil Parameters & Overburden at Founding Level")
 
+layers = st.session_state.get("layers", [])
 detected_layer = get_layer_at_depth(Df)
-
 if detected_layer is None:
-    st.error("⚠️ No soil layers defined in session state. Please define layers in P1 — Soil Profile first.")
+    st.error("⚠️ No soil layers defined. Define strata in P1 — Soil Profile first.")
     st.stop()
 
-with st.expander("📋 Detected layer at Df = {:.2f} m".format(Df), expanded=True):
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Symbol", detected_layer.get("symbol", "—"))
-    col2.metric("c′ (kPa)", f"{detected_layer.get('c_prime', 0.0):.1f}")
-    col3.metric("φ′ (°)", f"{detected_layer.get('phi_prime', 0.0):.1f}")
-    col4.metric("cu (kPa)", f"{detected_layer.get('cu', 0.0):.1f}")
+with st.expander(f"📋 Bearing stratum at Df = {Df:.2f} m: {detected_layer.get('name', '')}", expanded=True):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("IS 1498 Symbol", detected_layer.get("symbol", "—"))
+    c2.metric("c′ (kPa)", f"{detected_layer.get('c_prime', 0.0):.1f} kPa")
+    c3.metric("φ′ (°)", f"{detected_layer.get('phi_prime', 0.0):.1f} °")
+    c4.metric("cu (kPa)", f"{detected_layer.get('cu', 0.0):.1f} kPa")
 
-    col5, col6, col7 = st.columns(3)
-    col5.metric("γ_moist (kN/m³)", f"{detected_layer.get('gamma_moist', 18.0):.1f}")
-    col6.metric("γ_sat (kN/m³)", f"{detected_layer.get('gamma_sat', 20.0):.1f}")
-    col7.metric("Is undrained?", "Yes" if detected_layer.get("is_undrained", False) else "No")
+    c5, c6, c7 = st.columns(3)
+    c5.metric("γ_moist (kN/m³)", f"{detected_layer.get('gamma_moist', 18.0):.1f} kN/m³")
+    c6.metric("γ_sat (kN/m³)", f"{detected_layer.get('gamma_sat', 20.0):.1f} kN/m³")
+    c7.metric("Analysis mode", "Undrained (φ=0)" if detected_layer.get("is_undrained", False) else "Drained (c′–φ′)")
 
-override = st.checkbox("🔧 Override soil parameters manually")
-
+override = st.checkbox("🔧 Override bearing stratum parameters manually")
 if override:
-    st.markdown("**Manual soil parameters:**")
     oc1, oc2, oc3 = st.columns(3)
     with oc1:
-        c_prime = st.number_input("c′ (kPa)", min_value=0.0, max_value=500.0,
-                                   value=float(detected_layer.get("c_prime", 0.0)), step=0.5)
-        phi_prime = st.number_input("φ′ (°)", min_value=0.0, max_value=50.0,
-                                     value=float(detected_layer.get("phi_prime", 30.0)), step=0.5)
+        c_prime = st.number_input(
+            "c′ (kPa)", min_value=0.0, max_value=500.0,
+            value=float(detected_layer.get("c_prime", 0.0)), step=0.5,
+        )
+        phi_prime = st.number_input(
+            "φ′ (°)", min_value=0.0, max_value=55.0,
+            value=float(detected_layer.get("phi_prime", 30.0)), step=0.5,
+        )
     with oc2:
-        cu_val = st.number_input("cu (kPa)", min_value=0.0, max_value=500.0,
-                                  value=float(detected_layer.get("cu", 0.0)), step=0.5)
-        is_undrained = st.checkbox("Use undrained (φ=0) analysis",
-                                    value=bool(detected_layer.get("is_undrained", False)))
+        cu_val = st.number_input(
+            "cu (kPa)", min_value=0.0, max_value=500.0,
+            value=float(detected_layer.get("cu", 0.0)), step=0.5,
+        )
+        is_undrained = st.checkbox(
+            "Use undrained (φ = 0°) analysis — Cl. 5.1.3",
+            value=bool(detected_layer.get("is_undrained", False)),
+        )
     with oc3:
-        gamma_moist = st.number_input("γ_moist (kN/m³)", min_value=10.0, max_value=24.0,
-                                       value=float(detected_layer.get("gamma_moist", 18.0)), step=0.1)
-        gamma_sat = st.number_input("γ_sat (kN/m³)", min_value=10.0, max_value=24.0,
-                                     value=float(detected_layer.get("gamma_sat", 20.0)), step=0.1)
+        gamma_moist = st.number_input(
+            "γ_moist (kN/m³)", min_value=10.0, max_value=25.0,
+            value=float(detected_layer.get("gamma_moist", 18.0)), step=0.1,
+        )
+        gamma_sat = st.number_input(
+            "γ_sat (kN/m³)", min_value=10.0, max_value=25.0,
+            value=float(detected_layer.get("gamma_sat", 20.0)), step=0.1,
+        )
 else:
-    c_prime     = float(detected_layer.get("c_prime", 0.0))
-    phi_prime   = float(detected_layer.get("phi_prime", 30.0))
-    cu_val      = float(detected_layer.get("cu", 0.0))
+    c_prime = float(detected_layer.get("c_prime", 0.0))
+    phi_prime = float(detected_layer.get("phi_prime", 30.0))
+    cu_val = float(detected_layer.get("cu", 0.0))
     is_undrained = bool(detected_layer.get("is_undrained", False))
-    gamma_moist  = float(detected_layer.get("gamma_moist", 18.0))
-    gamma_sat    = float(detected_layer.get("gamma_sat", 20.0))
+    gamma_moist = float(detected_layer.get("gamma_moist", 18.0))
+    gamma_sat = float(detected_layer.get("gamma_sat", 20.0))
 
-# Effective overburden at founding level
-if wt_bgl >= Df:
-    q_eff_display = gamma_moist * Df
-    q_note = f"WT below footing base → q = γ_moist × Df = {gamma_moist:.1f} × {Df:.2f}"
-else:
-    q_eff_display = gamma_moist * wt_bgl + (gamma_sat - GAMMA_W) * (Df - wt_bgl)
-    q_note = (
-        f"WT above footing → q = γ_moist·{wt_bgl:.2f} + (γ_sat−γw)·{(Df - wt_bgl):.2f}"
-    )
-
-st.info(f"**Effective overburden q at founding level:** {q_eff_display:.2f} kPa  \n_{q_note}_")
+# Multi-layer effective overburden integration above Df
+q_eff_integrated = compute_effective_overburden(layers, Df, wt_bgl)
+st.info(
+    f"**Effective overburden pressure q at Df = {Df:.2f} m:** `{q_eff_integrated:.2f} kPa`  \n"
+    f"*(Integrated across all soil layers from 0.00 m to {Df:.2f} m bgl using "
+    f"γ_moist above WT = {wt_bgl:.2f} m and γ_sat − γw below WT.)*"
+)
 
 # ---------------------------------------------------------------------------
-# SECTION C — Results
+# SECTION C — IS 6403:1981 Bearing Capacity Results
 # ---------------------------------------------------------------------------
 st.header("📊 Section C — Bearing Capacity Results")
 
-B_calc = B_sidebar
-L_calc = L_sidebar
-
-result = net_ultimate_bearing_capacity(
+footing_spec = FootingSpec(
+    B=B_sidebar,
+    L=L_sidebar,
+    Df=Df,
+    footing_shape=footing_shape,  # type: ignore[arg-type]
+    ex=ex_input,
+    ey=ey_input,
+    alpha_deg=alpha_deg,
+)
+soil_state = SoilFoundingState(
     c_prime=c_prime,
     phi_prime_deg=phi_prime,
     gamma_moist=gamma_moist,
     gamma_sat=gamma_sat,
-    Df=Df,
-    B=B_calc,
-    L=L_calc,
     wt_bgl=wt_bgl,
-    footing_shape=footing_shape,
-    failure_mode=failure_mode,
-    alpha_deg=alpha_deg,
+    q_eff=q_eff_integrated,
     is_undrained=is_undrained,
     cu=cu_val,
 )
 
-qf   = result["qf"]
-qnu  = result["qnu"]
-qns  = net_safe_bearing_capacity(qnu, FOS)
+try:
+    result = SOLVER.solve(footing_spec, soil_state, FOS=FOS, failure_mode=failure_mode)
+except ValueError as exc:
+    st.error(f"Input error: {exc}")
+    st.stop()
 
-# Results card
-c_res1, c_res2, c_res3, c_res4 = st.columns(4)
-c_res1.metric("qf — Gross Ultimate", f"{qf:.2f} kPa")
-c_res2.metric("qnu — Net Ultimate", f"{qnu:.2f} kPa")
-c_res3.metric("qns — Net Safe", f"{qns:.2f} kPa")
-c_res4.metric("FOS (applied)", f"{FOS:.1f}")
+if result.kern_warning:
+    st.warning(
+        f"⚠️ **Kern / Tension Lift-off Warning (IS 6403:1981 Cl. 5.4):** "
+        f"Eccentricity exceeds the middle-third limit "
+        f"(ex = {ex_input:.3f} m vs. B/6 = {result.B/6:.3f} m; "
+        f"ey = {ey_input:.3f} m vs. L/6 = {result.L/6:.3f} m). "
+        f"Partial footing lift-off may occur; design relies on reduced effective area "
+        f"B′ × L′ = {result.B_prime:.3f} m × {result.L_prime:.3f} m."
+    )
 
-# Intermediate values expander
-with st.expander("🔍 Intermediate Values (IS 6403:1981 Factors)", expanded=False):
-    factors_data = {
-        "Parameter": [
-            "Nc", "Nq", "Nγ",
-            "sc (shape, c-term)", "sq (shape, q-term)", "sγ (shape, γ-term)",
-            "dc (depth, c-term)", "dq (depth, q-term)", "dγ (depth, γ-term)",
-            "ic (incl., c-term)", "iq (incl., q-term)", "iγ (incl., γ-term)",
-            "W′ (WT factor)",
-            "q_eff (overburden)",
-            "γ_eff for Nγ term",
-            "B (width)", "L (length)",
-            "c used", "φ used",
-        ],
-        "Value": [
-            f"{result['Nc']:.4f}", f"{result['Nq']:.4f}", f"{result['Ngamma']:.4f}",
-            f"{result['sc']:.4f}", f"{result['sq']:.4f}", f"{result['sgamma']:.4f}",
-            f"{result['dc']:.4f}", f"{result['dq']:.4f}", f"{result['dgamma']:.4f}",
-            f"{result['ic']:.4f}", f"{result['iq']:.4f}", f"{result['igamma']:.4f}",
-            f"{result['W_prime']:.4f}",
-            f"{result['q_eff']:.3f} kPa",
-            f"{result['gamma_ngamma']:.3f} kN/m³",
-            f"{B_calc:.3f} m", f"{L_calc:.3f} m" if footing_shape not in ('square', 'circular', 'strip') else f"{B_calc:.3f} m",
-            f"{result['c_used']:.2f} kPa", f"{result['phi_used']:.2f} °",
-        ],
-        "IS 6403:1981 Reference": [
-            "Table 1", "Table 1", "Table 1",
-            "Cl. 5.1", "Cl. 5.1", "Cl. 5.1",
-            "Cl. 5.1", "Cl. 5.1", "Cl. 5.1",
-            "Cl. 5.1", "Cl. 5.1", "Cl. 5.1",
-            "Cl. 5.2",
-            "Cl. 5.1", "Cl. 5.2",
-            "—", "—",
-            "Cl. 5.3" if failure_mode == "local" else "Cl. 5.1",
-            "Cl. 5.3" if failure_mode == "local" else "Cl. 5.1",
-        ],
-    }
-    st.dataframe(pd.DataFrame(factors_data), use_container_width=True, hide_index=True)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("qf — Gross Ultimate (kPa)", f"{result.qf:.2f} kPa")
+m2.metric("qnu — Net Ultimate (kPa)", f"{result.qnu:.2f} kPa")
+m3.metric("qns — Net Safe (kPa)", f"{result.qns:.2f} kPa")
+m4.metric("Applied FOS (—)", f"{result.FOS:.2f}")
 
-    if failure_mode == "local":
+st.caption(f"**Active Strategy:** {result.strategy_name}")
+
+with st.expander("🔍 All IS 6403:1981 Factors & Intermediate Values", expanded=True):
+    col_tbl, col_chart = st.columns([1.2, 1.0])
+    with col_tbl:
+        st.dataframe(
+            PRESENTER.build_factors_dataframe(result),
+            use_container_width=True,
+            hide_index=True,
+        )
+    with col_chart:
+        st.plotly_chart(
+            PRESENTER.create_term_contribution_figure(result),
+            use_container_width=True,
+        )
+
+    if result.failure_mode == "local":
         st.warning(
-            "⚠️ **Local shear mode active** (IS 6403:1981 Cl. 5.3): "
-            f"c reduced to {result['c_used']:.2f} kPa (= 2/3·c′), "
-            f"φ reduced to {result['phi_used']:.2f}° (= arctan(2/3·tan φ′))."
+            f"⚠️ **Local Shear Reduction (IS 6403:1981 Cl. 5.1.2.2):** "
+            f"cm = (2/3)·c′ = `{result.c_used:.2f} kPa`, "
+            f"φm = arctan((2/3)·tan φ′) = `{result.phi_used:.2f}°`."
         )
 
 # ---------------------------------------------------------------------------
-# SECTION D — Footing Sizing for Column Types
+# SECTION D — Iterative Footing Sizing for Service Loads
 # ---------------------------------------------------------------------------
-st.header("📐 Section D — Footing Sizing for Column Types")
-st.markdown(
-    "> **Note:** Loads are service loads. For wind/seismic combinations multiply by λ = 1 + g/100."
-)
+st.header("📐 Section D — Footing Sizing for Column Loads")
+st.caption("Service column loads P (kN) at founding level; square footing sizing rounded up to 0.05 m.")
 
-sizing_col1, sizing_col2, sizing_col3 = st.columns(3)
-with sizing_col1:
-    P_corner = st.number_input("Corner column P (kN)", min_value=10.0, max_value=10000.0, value=400.0, step=10.0)
-with sizing_col2:
-    P_edge   = st.number_input("Edge column P (kN)",   min_value=10.0, max_value=10000.0, value=600.0, step=10.0)
-with sizing_col3:
-    P_interior = st.number_input("Interior column P (kN)", min_value=10.0, max_value=10000.0, value=900.0, step=10.0)
+sc1, sc2, sc3 = st.columns(3)
+with sc1:
+    P_corner = st.number_input("Corner column P (kN)", min_value=10.0, max_value=20000.0, value=650.0, step=10.0)
+with sc2:
+    P_edge = st.number_input("Edge column P (kN)", min_value=10.0, max_value=20000.0, value=1000.0, step=10.0)
+with sc3:
+    P_interior = st.number_input("Interior column P (kN)", min_value=10.0, max_value=20000.0, value=1450.0, step=10.0)
 
 sizing_rows = []
-for col_type, P in [("Corner", P_corner), ("Edge", P_edge), ("Interior", P_interior)]:
-    sz = required_footing_size(
-        P_kN=P,
-        c_prime=c_prime, phi_prime_deg=phi_prime,
-        gamma_moist=gamma_moist, gamma_sat=gamma_sat,
-        Df=Df, wt_bgl=wt_bgl,
+for col_type, P_val in [("Corner", P_corner), ("Edge", P_edge), ("Interior", P_interior)]:
+    sz = SOLVER.required_footing_size(
+        P_kN=P_val,
+        soil=soil_state,
+        Df=Df,
         FOS=FOS,
         footing_shape="square",
         failure_mode=failure_mode,
         alpha_deg=alpha_deg,
-        is_undrained=is_undrained,
-        cu=cu_val,
     )
-    actual_fos = sz["actual_FOS"]
-    fos_ok = actual_fos >= FOS
+    fos_ok = sz["actual_FOS"] >= FOS
     sizing_rows.append({
         "Column Type": col_type,
-        "P (kN)": f"{P:.0f}",
-        "Required B (m)": f"{sz['B']:.2f}",
+        "Service Load P (kN)": f"{P_val:.1f}",
+        "Required B = L (m)": f"{sz['B']:.2f}",
         "qnu (kPa)": f"{sz['qnu']:.2f}",
         "qns (kPa)": f"{sz['qns']:.2f}",
-        "Actual FOS": f"{actual_fos:.2f}",
+        "Actual FOS (—)": f"{sz['actual_FOS']:.2f}",
         "Status": "✅ OK" if fos_ok else "❌ NG",
     })
 
 sizing_df = pd.DataFrame(sizing_rows)
-
-def color_status(val):
-    if "✅" in str(val):
-        return "background-color: #d4edda; color: #155724;"
-    elif "❌" in str(val):
-        return "background-color: #f8d7da; color: #721c24;"
-    return ""
-
-styled_df = sizing_df.style.map(color_status, subset=["Status"])
-st.dataframe(styled_df, use_container_width=True, hide_index=True)
+st.dataframe(
+    sizing_df.style.map(
+        lambda v: "background-color: #d4edda; color: #155724;"
+        if "✅" in str(v)
+        else ("background-color: #f8d7da; color: #721c24;" if "❌" in str(v) else ""),
+        subset=["Status"],
+    ),
+    use_container_width=True,
+    hide_index=True,
+)
 
 # ---------------------------------------------------------------------------
-# SECTION E — Water Table Effect
+# SECTION E — Water Table Sensitivity (Cl. 5.1.2.3)
 # ---------------------------------------------------------------------------
-st.header("💧 Section E — Water Table Effect on qnu")
+st.header("💧 Section E — Water Table Effect on Bearing Capacity (Cl. 5.1.2.3)")
 
-W_prime_current = result["W_prime"]
-st.metric("W′ (current WT position)", f"{W_prime_current:.3f}")
-if W_prime_current == 0.5:
-    st.info("WT at or above footing base → W′ = 0.5 (fully reduced Nγ term). qnu is at minimum.")
-elif W_prime_current == 1.0:
-    st.info("WT deeper than B below footing → W′ = 1.0 (no WT correction). qnu is at maximum.")
-else:
-    st.warning(f"WT between footing base and B below → W′ = {W_prime_current:.3f} (interpolated).")
-
-# Plot qnu vs WT depth
-wt_range = np.linspace(0.0, Df + B_calc * 2.0, 60)
-qnu_values = []
-for wt_i in wt_range:
-    res_i = net_ultimate_bearing_capacity(
-        c_prime=c_prime, phi_prime_deg=phi_prime,
-        gamma_moist=gamma_moist, gamma_sat=gamma_sat,
-        Df=Df, B=B_calc, L=L_calc, wt_bgl=wt_i,
-        footing_shape=footing_shape, failure_mode=failure_mode,
-        alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu_val,
-    )
-    qnu_values.append(res_i["qnu"])
-
-fig_wt = go.Figure()
-fig_wt.add_trace(go.Scatter(
-    x=wt_range, y=qnu_values,
-    mode="lines+markers",
-    name="qnu (kPa)",
-    line=dict(color="#1f4e79", width=2),
-    marker=dict(size=4),
-))
-fig_wt.add_vline(
-    x=wt_bgl, line_dash="dash", line_color="blue",
-    annotation_text=f"Current WT = {wt_bgl:.1f} m",
-    annotation_position="top right",
-)
-fig_wt.add_vline(
-    x=Df, line_dash="dot", line_color="orange",
-    annotation_text=f"Footing base Df = {Df:.1f} m",
-    annotation_position="top left",
-)
-fig_wt.update_layout(
-    title="Net Ultimate Bearing Capacity vs Water Table Depth (IS 6403:1981 Cl. 5.2)",
-    xaxis_title="Water Table Depth (m bgl)",
-    yaxis_title="qnu (kPa)",
-    template="plotly_white",
-    height=420,
-    legend=dict(orientation="h", y=-0.2),
+st.metric("W′ (current water-table factor, —)", f"{result.W_prime:.3f}")
+fig_wt = PRESENTER.create_water_table_sensitivity_figure(
+    solver=SOLVER,
+    footing=footing_spec,
+    soil_template=soil_state,
+    layers=layers,
+    FOS=FOS,
+    failure_mode=failure_mode,
+    use_profile_overburden=True,
 )
 st.plotly_chart(fig_wt, use_container_width=True)
 
-st.markdown(
-    """
-    **Interpretation (IS 6403:1981 Cl. 5.2):**
-    - If WT rises to footing base: Nγ term is halved (W′ = 0.5) — significant reduction in qnu.
-    - If WT is deeper than *B* below footing base: no correction needed (W′ = 1.0).
-    - The Nq term uses effective overburden pressure q, which also reduces as WT rises.
-    """
-)
-
 # ---------------------------------------------------------------------------
-# SECTION F — Eccentric Loading
+# SECTION F — Eccentric Loading Check (Cl. 5.4)
 # ---------------------------------------------------------------------------
-st.header("📏 Section F — Eccentric Loading (IS 6403:1981 Cl. 5.4)")
+st.header("📏 Section F — Eccentric Loading Check (IS 6403:1981 Cl. 5.4)")
 
-if footing_shape != "rectangular":
-    st.info("Eccentric loading effective area applies to rectangular footings. Select Rectangular in the sidebar.")
+if not supports_eccentric:
+    st.info("Select **Square** or **Rectangular** footing in the sidebar to evaluate biaxial eccentric loading.")
 else:
-    st.markdown("Compute effective dimensions B_eff and L_eff for eccentric column loading.")
+    ef1, ef2 = st.columns(2)
+    with ef1:
+        P_ecc = st.number_input("Column load P (kN)", min_value=1.0, value=1000.0, step=10.0, key="ecc_P")
+        Mx = st.number_input("Moment Mx (kN·m) → ey = Mx / P", min_value=0.0, value=0.0, step=1.0, key="ecc_Mx")
+        My = st.number_input("Moment My (kN·m) → ex = My / P", min_value=0.0, value=0.0, step=1.0, key="ecc_My")
 
-    ef_col1, ef_col2 = st.columns(2)
-    with ef_col1:
-        P_eccentric = st.number_input("Column load P (kN) for eccentricity calc", min_value=10.0, value=600.0, step=10.0)
-        Mx = st.number_input("Moment Mx (kN·m) about X-axis (→ ey)", min_value=0.0, value=0.0, step=1.0)
-        My = st.number_input("Moment My (kN·m) about Y-axis (→ ex)", min_value=0.0, value=0.0, step=1.0)
+    ex_final = max(ex_input, My / P_ecc if P_ecc > 0 else 0.0)
+    ey_final = max(ey_input, Mx / P_ecc if P_ecc > 0 else 0.0)
 
-    # Recompute ex, ey from moments if entered
-    ex_from_moment = My / P_eccentric if P_eccentric > 0 else 0.0
-    ey_from_moment = Mx / P_eccentric if P_eccentric > 0 else 0.0
+    ecc_spec = FootingSpec(
+        B=B_sidebar,
+        L=L_sidebar,
+        Df=Df,
+        footing_shape=footing_shape,  # type: ignore[arg-type]
+        ex=ex_final,
+        ey=ey_final,
+        alpha_deg=alpha_deg,
+    )
+    b_eff, l_eff, b_prime, l_prime, a_eff, ecc_kern_warn = ecc_spec.effective_dimensions()
 
-    # Use larger of sidebar input or moment-derived eccentricity
-    ex_final = max(ex_input, ex_from_moment)
-    ey_final = max(ey_input, ey_from_moment)
-
-    B_eff, L_eff, A_eff = effective_area(B_sidebar, L_sidebar, ex_final, ey_final)
-
-    with ef_col2:
-        st.markdown("**Effective dimensions (IS 6403:1981 Cl. 5.4):**")
-        st.markdown(f"- **ex** = max(sidebar, My/P) = **{ex_final:.3f} m**")
-        st.markdown(f"- **ey** = max(sidebar, Mx/P) = **{ey_final:.3f} m**")
-        st.markdown(f"- **B_eff** = B − 2·ex = {B_sidebar:.2f} − {2*ex_final:.3f} = **{B_eff:.3f} m**")
-        st.markdown(f"- **L_eff** = L − 2·ey = {L_sidebar:.2f} − {2*ey_final:.3f} = **{L_eff:.3f} m**")
-        st.markdown(f"- **A_eff** = B_eff × L_eff = **{A_eff:.3f} m²**")
-
-        if B_eff <= 0 or L_eff <= 0:
-            st.error("⚠️ Eccentricity too large — effective area is zero or negative. Redesign footing.")
-        else:
-            # Recompute bearing capacity with effective dimensions
-            res_eff = net_ultimate_bearing_capacity(
-                c_prime=c_prime, phi_prime_deg=phi_prime,
-                gamma_moist=gamma_moist, gamma_sat=gamma_sat,
-                Df=Df, B=B_eff, L=L_eff, wt_bgl=wt_bgl,
-                footing_shape="rectangular", failure_mode=failure_mode,
-                alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu_val,
+    with ef2:
+        st.markdown(
+            f"- **ex** = `{ex_final:.3f} m` &nbsp;|&nbsp; **ey** = `{ey_final:.3f} m`\n"
+            f"- **B_eff** = B − 2·ex = `{b_eff:.3f} m` &nbsp;|&nbsp; **L_eff** = L − 2·ey = `{l_eff:.3f} m`\n"
+            f"- **Normalized B′** = min(B_eff, L_eff) = `{b_prime:.3f} m` &nbsp;|&nbsp; "
+            f"**L′** = max(B_eff, L_eff) = `{l_prime:.3f} m`\n"
+            f"- **Effective area A_eff** = `{a_eff:.3f} m²`"
+        )
+        if ecc_kern_warn:
+            st.warning(
+                f"⚠️ **Kern check exceeded:** ex ≥ B/6 ({B_sidebar/6:.3f} m) or "
+                f"ey ≥ L/6 ({L_sidebar/6:.3f} m) — tension / lift-off possible."
             )
-            qnu_eff  = res_eff["qnu"]
-            qns_eff  = net_safe_bearing_capacity(qnu_eff, FOS)
-            q_applied = P_eccentric / A_eff
 
-            st.metric("qns with effective area", f"{qns_eff:.2f} kPa")
-            st.metric("Applied pressure (P/A_eff)", f"{q_applied:.2f} kPa")
-            if q_applied <= qns_eff:
-                st.success(f"✅ OK — Applied pressure {q_applied:.2f} kPa ≤ qns {qns_eff:.2f} kPa")
+        if b_eff <= 0.0 or l_eff <= 0.0:
+            st.error("❌ Eccentricity too large — effective area is zero or negative. Increase footing size.")
+        else:
+            res_ecc = SOLVER.solve(ecc_spec, soil_state, FOS=FOS, failure_mode=failure_mode)
+            q_applied = P_ecc / res_ecc.A_eff
+            c_e1, c_e2 = st.columns(2)
+            c_e1.metric("qns (effective area, kPa)", f"{res_ecc.qns:.2f} kPa")
+            c_e2.metric("Applied pressure P / A_eff (kPa)", f"{q_applied:.2f} kPa")
+            if q_applied <= res_ecc.qns:
+                st.success(f"✅ PASS — {q_applied:.2f} kPa ≤ {res_ecc.qns:.2f} kPa")
             else:
-                st.error(f"❌ NG — Applied pressure {q_applied:.2f} kPa > qns {qns_eff:.2f} kPa. Increase footing size.")
+                st.error(f"❌ FAIL — {q_applied:.2f} kPa > {res_ecc.qns:.2f} kPa")
 
-# ---------------------------------------------------------------------------
-# Footer
-# ---------------------------------------------------------------------------
 st.divider()
-st.caption(
-    "IS 6403:1981 — Code of Practice for Determination of Bearing Capacity of Shallow Foundations. "
-    "IIT Mandi CE 402 · All calculations in SI units (kN, kPa, m)."
-)
+st.caption("IS 6403:1981 — Code of Practice for Determination of Bearing Capacity of Shallow Foundations · All SI units (kN, kPa, m, °).")

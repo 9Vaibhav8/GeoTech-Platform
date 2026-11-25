@@ -186,9 +186,10 @@ with tab1:
         )
 
     with st.expander("📐 Formula — Schmertmann (1978)"):
+        st.latex(
+            r"S_i = C_1 \cdot C_2 \cdot \Delta p \sum_{j} \frac{I_{z,j}}{E_{s,j}} \Delta z_j"
+        )
         st.markdown(r"""
-$$S_i = C_1 \cdot C_2 \cdot \Delta p \sum_{j} \frac{I_{z,j}}{E_{s,j}} \Delta z_j$$
-
 where:
 - $C_1 = 1 - 0.5\,(\sigma'_{v0}/\Delta p) \geq 0.5$ — embedment correction
 - $C_2 = 1 + 0.2\,\log_{10}(t/0.1)$ — creep correction ($t$ in years)
@@ -333,8 +334,12 @@ with tab2:
 **OC→NC (crosses $p_c$):** $S_c = \dfrac{C_r}{1+e_0} H \log_{10}\!\left(\dfrac{p_c}{\sigma'_{v0}}\right) + \dfrac{C_c}{1+e_0} H \log_{10}\!\left(\dfrac{\sigma'_{v0}+\Delta\sigma}{p_c}\right)$
 
 **Degree of consolidation:**
-$$U = \sqrt{\frac{4T_v}{\pi}} \quad (U \leq 0.6) \qquad U = 1 - \frac{8}{\pi^2}e^{-\pi^2 T_v/4} \quad (U > 0.6)$$
-
+        """)
+        st.latex(
+            r"U = \sqrt{\frac{4T_v}{\pi}} \quad (U \leq 0.6) "
+            r"\qquad U = 1 - \frac{8}{\pi^2}e^{-\pi^2 T_v/4} \quad (U > 0.6)"
+        )
+        st.markdown(r"""
 where $T_v = c_v t / H_{dr}^2$
 
 *Cite: Terzaghi (1943); Das (2016) Eq. 7.21-7.23, 7.56-7.57; IS 8009:1976 Part 1*
