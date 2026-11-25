@@ -1,458 +1,696 @@
 """
 utils/settlement.py
-Immediate (Schmertmann 1978) and 1D consolidation (Terzaghi 1943) settlement.
-Cite: Schmertmann et al. (1978); Terzaghi (1943); IS 8009:1976 Part 1;
-      Das (2016) Principles of Foundation Engineering.
+Pure-domain immediate settlement (Schmertmann et al. 1978) and 1D primary
+consolidation settlement & time-rate curves (Terzaghi 1943; IS 8009:1976).
+
+Design Principles (SOLID)
+-------------------------
+- Single Responsibility (SRP):
+  * `SchmertmannModulusCorrelation` converts corrected SPT N to Es.
+  * `SchmertmannStrainInfluence` computes Iz(z) and influence depths.
+  * `SchmertmannSettlementCalculator` evaluates immediate granular settlement.
+  * `ConsolidationSettlementCalculator` evaluates 1D NC/OC/OC→NC clay settlement.
+  * `TimeRateConsolidationModel` evaluates Terzaghi U(Tv) and S(t) curves.
+- Open/Closed (OCP) & Dependency Inversion (DIP):
+  Calculators depend on abstract `SoilModulusCorrelation`, `StrainInfluenceProfile`,
+  and `StressDistributionModel` interfaces, making correlations or stress theories
+  swappable without editing calculation logic.
+
+References
+----------
+- Schmertmann, J. H., Hartman, J. P., & Brown, P. R. (1978) — Improved strain
+  influence factor diagrams, J. Geotech. Eng. Div., ASCE, 104(GT8), 1131–1135
+- Meyerhof, G. G. (1956) — Penetration tests and bearing capacity of cohesionless soils
+- Terzaghi, K. (1943) — Theoretical Soil Mechanics (1D consolidation theory)
+- IS 8009:1976 Part 1 — Code of Practice for Calculation of Settlements of Foundations
+- Das, B. M. (2016) — Principles of Foundation Engineering (8th ed.),
+  Eq. 5.50–5.53, Table 5.6, Eq. 7.21–7.23, Eq. 7.56–7.57
 """
 
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+import math
+from typing import Any, Mapping, Sequence
+
 import numpy as np
-from utils.stress_increase import stress_increase_centre
+
+from utils.models import (
+    ConsolidationRegime,
+    ConsolidationResult,
+    ConsolidationSublayerResult,
+    DrainageCondition,
+    FootingGeometry,
+    FoundationLoad,
+    GAMMA_W,
+    SECONDS_PER_YEAR,
+    SchmertmannResult,
+    SchmertmannSublayerResult,
+    SoilLayer,
+    SoilProfile,
+    TimeSettlementResult,
+)
+from utils.stress_increase import BoussinesqCentreModel, StressDistributionModel
+
 
 # ---------------------------------------------------------------------------
-# Constants
+# Shared Net Foundation Pressure Helper
 # ---------------------------------------------------------------------------
-GAMMA_W = 9.81  # kN/m³
-GRANULAR_SYMBOLS = {"SM", "SP", "SW", "SC", "GW", "GP", "GM", "GC", "Fill"}
-
-
-# ---------------------------------------------------------------------------
-# Helper — effective stress at a given depth bgl
-# ---------------------------------------------------------------------------
-def _effective_stress_at(layers, z_bgl, wt_design_bgl):
+def compute_net_foundation_pressure(
+    profile: SoilProfile,
+    footing: FootingGeometry,
+    load: FoundationLoad,
+    wt_design_bgl: float | None = None,
+) -> float:
     """
-    Compute vertical effective stress (kPa) at depth z_bgl (m bgl).
-    Uses moist unit weight above WT and buoyant weight below WT.
+    Compute net foundation pressure Δp (kPa) at founding depth Df:
+        Δp = P / (B · L) − σ′v0(Df)
+
+    Uses effective vertical overburden at Df (accounting for water table if
+    wt_design_bgl < Df), clamped to a small positive floor only when needed to
+    prevent divide-by-zero in embedment factor C1.
+
+    Cite: Schmertmann et al. (1978) Eq. 1; Das (2016) Eq. 5.50–5.51
     """
-    sigma_v = 0.0
-    u = 0.0
-    for lyr in layers:
-        if lyr["depth_top"] >= z_bgl:
-            break
-        z_top = lyr["depth_top"]
-        z_bot = min(lyr["depth_bot"], z_bgl)
-        dz = z_bot - z_top
-        if z_bot <= wt_design_bgl:
-            # fully above WT — moist
-            sigma_v += lyr.get("gamma_moist", 18.0) * dz
-        elif z_top >= wt_design_bgl:
-            # fully below WT — saturated
-            sigma_v += lyr.get("gamma_sat", 20.0) * dz
-            u += GAMMA_W * dz
+    q_gross = load.P_kN / footing.area
+    # Effective overburden stress at founding base Df — Das (2016) Eq. 2.10
+    sigma_v0_df = profile.effective_vertical_stress(footing.Df, wt_bgl=wt_design_bgl)
+    # Net pressure Δp = q_gross − σ′v0(Df) — Schmertmann et al. (1978) Eq. 1
+    delta_p = q_gross - sigma_v0_df
+    return max(delta_p, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Strategy Interfaces (OCP / ISP / DIP)
+# ---------------------------------------------------------------------------
+class SoilModulusCorrelation(ABC):
+    """Abstract correlation for equivalent elastic Young's modulus Es (kPa)."""
+
+    @property
+    @abstractmethod
+    def citation(self) -> str:
+        """Source citation for Es correlation."""
+
+    @abstractmethod
+    def estimate_Es_kPa(self, layer: SoilLayer) -> float:
+        """Estimate drained elastic modulus Es (kPa) for a granular SoilLayer."""
+
+
+class StrainInfluenceProfile(ABC):
+    """Abstract vertical strain influence factor distribution Iz(z)."""
+
+    @abstractmethod
+    def influence_bounds(
+        self, footing: FootingGeometry
+    ) -> tuple[float, float, float]:
+        """Return (Iz_surface, z1_peak_depth_m, z2_cutoff_depth_m)."""
+
+    @abstractmethod
+    def Iz_at(
+        self, z: float, footing: FootingGeometry, Iz_peak: float
+    ) -> float:
+        """Evaluate strain influence factor Iz at depth z below footing base."""
+
+
+# ---------------------------------------------------------------------------
+# Concrete Strategies for Schmertmann (1978)
+# ---------------------------------------------------------------------------
+class SchmertmannModulusCorrelation(SoilModulusCorrelation):
+    """
+    SPT-based elastic modulus correlation for granular soils:
+        Sand   : Es = 500  × (N_corr + 15)   [kPa]
+        Gravel : Es = 1000 × (N_corr + 15)   [kPa]
+
+    Cite: Meyerhof (1956); Schmertmann et al. (1978); Das (2016) Table 5.6
+    """
+
+    def __init__(self, default_N: int = 10) -> None:
+        self.default_N = default_N
+
+    @property
+    def citation(self) -> str:
+        return "Meyerhof (1956); Schmertmann et al. (1978); Das (2016) Table 5.6"
+
+    def estimate_Es_kPa(self, layer: SoilLayer) -> float:
+        n_val = layer.effective_N if layer.effective_N is not None else self.default_N
+        return self.from_N(n_val, "gravel" if layer.is_gravel else "sand")
+
+    @staticmethod
+    def from_N(N_corrected: int | float | None, soil_type: str = "sand") -> float:
+        """
+        Compute Es (kPa) from corrected SPT N and granular soil class.
+
+        Cite: Meyerhof (1956); Das (2016) Table 5.6
+        """
+        n_eff = max(1, int(round(N_corrected))) if N_corrected else 5
+        if soil_type.lower() in ("gravel", "gw", "gp", "gm", "gc"):
+            # Gravel modulus correlation: Es = 1000 * (N + 15) kPa — Das (2016) Table 5.6
+            return 1000.0 * (n_eff + 15)
+        # Sand modulus correlation: Es = 500 * (N + 15) kPa — Meyerhof (1956); Das (2016) Table 5.6
+        return 500.0 * (n_eff + 15)
+
+
+class SchmertmannStrainInfluence(StrainInfluenceProfile):
+    """
+    Schmertmann, Hartman & Brown (1978) bilinear strain influence diagram Iz(z):
+      - Axisymmetric (square/circular, L/B = 1):
+          Iz(0) = 0.1,  z1 = 0.5·B,  z2 = 2.0·B
+      - Plane strain (strip, L/B >= 10):
+          Iz(0) = 0.2,  z1 = 1.0·B,  z2 = 4.0·B
+      - Rectangular (1 < L/B < 10):
+          Optional smooth linear interpolation in L/B between axisymmetric and
+          strip bounds, or discrete square/strip selection when disabled.
+
+    Cite: Schmertmann et al. (1978) Fig. 4; Das (2016) Fig. 5.20 & Eq. 5.53
+    """
+
+    def __init__(self, interpolate_rectangular: bool = False) -> None:
+        self.interpolate_rectangular = interpolate_rectangular
+
+    def influence_bounds(
+        self, footing: FootingGeometry
+    ) -> tuple[float, float, float]:
+        B = footing.B
+        if footing.is_strip:
+            # Plane strain (strip, L/B >= 10) — Schmertmann et al. (1978) Fig. 4
+            return 0.2, 1.0 * B, 4.0 * B
+
+        if self.interpolate_rectangular and 1.0 < footing.aspect_ratio < 10.0:
+            # Linear interpolation between L/B=1 and L/B=10 — Schmertmann et al. (1978)
+            w = (footing.aspect_ratio - 1.0) / 9.0
+            iz0 = 0.1 + 0.1 * w
+            z1 = (0.5 + 0.5 * w) * B
+            z2 = (2.0 + 2.0 * w) * B
+            return iz0, z1, z2
+
+        # Axisymmetric (square/circular) — Schmertmann et al. (1978) Fig. 4
+        return 0.1, 0.5 * B, 2.0 * B
+
+    def Iz_at(
+        self, z: float, footing: FootingGeometry, Iz_peak: float
+    ) -> float:
+        iz0, z1, z2 = self.influence_bounds(footing)
+        if z <= 0.0:
+            return iz0
+        if z <= z1:
+            # Ascending linear branch [0, z1] — Schmertmann et al. (1978) Fig. 4
+            return iz0 + (Iz_peak - iz0) * (z / z1)
+        if z <= z2:
+            # Descending linear branch [z1, z2] — Schmertmann et al. (1978) Fig. 4
+            return Iz_peak * (z2 - z) / (z2 - z1)
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Immediate Settlement Calculator — Schmertmann et al. (1978)
+# ---------------------------------------------------------------------------
+class SchmertmannSettlementCalculator:
+    """
+    Computes immediate elastic settlement S_i of footings over granular strata
+    using sublayers <= 0.5 m thick.
+
+    Cite: Schmertmann et al. (1978) Eq. 1–4; IS 8009:1976 Part 1; Das (2016) Eq. 5.50–5.53
+    """
+
+    def __init__(
+        self,
+        modulus_correlation: SoilModulusCorrelation | None = None,
+        influence_profile: StrainInfluenceProfile | None = None,
+        max_sublayer_thickness_m: float = 0.5,
+    ) -> None:
+        if max_sublayer_thickness_m <= 0.0 or max_sublayer_thickness_m > 0.5:
+            raise ValueError("max_sublayer_thickness_m must lie in (0.0, 0.5] m.")
+        self.modulus = modulus_correlation or SchmertmannModulusCorrelation()
+        self.influence = influence_profile or SchmertmannStrainInfluence()
+        self.max_sublayer_thickness_m = max_sublayer_thickness_m
+
+    def calculate(
+        self,
+        profile: SoilProfile,
+        footing: FootingGeometry,
+        load: FoundationLoad,
+        wt_design_bgl: float | None = None,
+        t_years: float = 50.0,
+    ) -> SchmertmannResult:
+        delta_p = compute_net_foundation_pressure(
+            profile, footing, load, wt_design_bgl=wt_design_bgl
+        )
+        sigma_v0 = profile.effective_vertical_stress(
+            footing.Df, wt_bgl=wt_design_bgl
+        )
+
+        # Embedment correction factor C1 >= 0.5 — Schmertmann et al. (1978) Eq. 2; Das (2016) Eq. 5.51
+        C1 = max(0.5, 1.0 - 0.5 * (sigma_v0 / delta_p))
+        # Creep time correction factor C2 — Schmertmann et al. (1978) Eq. 3; Das (2016) Eq. 5.52
+        C2 = 1.0 + 0.2 * math.log10(max(float(t_years), 0.1) / 0.1)
+
+        _, z1_peak, z2_max = self.influence.influence_bounds(footing)
+        # Effective vertical stress at peak influence depth (Df + z1) — Das (2016) Eq. 5.53
+        sigma_vp = profile.effective_vertical_stress(
+            footing.Df + z1_peak, wt_bgl=wt_design_bgl
+        )
+        if sigma_vp > 0.0 and delta_p > 0.0:
+            # Peak strain influence factor Izp — Schmertmann et al. (1978) Eq. 4; Das (2016) Eq. 5.53
+            Iz_peak = 0.5 + 0.1 * math.sqrt(delta_p / sigma_vp)
         else:
-            # straddles WT
-            dz_above = wt_design_bgl - z_top
-            dz_below = z_bot - wt_design_bgl
-            sigma_v += lyr.get("gamma_moist", 18.0) * dz_above
-            sigma_v += lyr.get("gamma_sat", 20.0) * dz_below
-            u += GAMMA_W * dz_below
-    return sigma_v - u
+            Iz_peak = 0.6
 
+        z_start = footing.Df
+        z_end = footing.Df + z2_max
+        sublayers: list[SchmertmannSublayerResult] = []
+        sum_iz_over_es_dz = 0.0
 
-def _layer_at_depth(layers, z_bgl):
-    """Return the layer dict containing z_bgl, or None."""
-    for lyr in layers:
-        if lyr["depth_top"] <= z_bgl < lyr["depth_bot"]:
-            return lyr
-    return layers[-1] if layers else None
-
-
-def _net_foundation_pressure(layers, Df, B, L, P_kN, wt_design_bgl):
-    """
-    Net foundation pressure Δp = P / (B×L) - γ_avg × Df (kPa).
-    γ_avg = weighted average unit weight of soil above footing base.
-    """
-    q_gross = P_kN / (B * L)
-    # weighted average unit weight above Df
-    total_weight = 0.0
-    total_depth = 0.0
-    for lyr in layers:
-        if lyr["depth_top"] >= Df:
-            break
-        z_top = lyr["depth_top"]
-        z_bot = min(lyr["depth_bot"], Df)
-        dz = z_bot - z_top
-        total_weight += lyr.get("gamma_moist", 18.0) * dz
-        total_depth += dz
-    gamma_avg = total_weight / total_depth if total_depth > 0 else 18.0
-    delta_p = q_gross - gamma_avg * Df
-    return max(delta_p, 1.0)  # must be positive
-
-
-# ---------------------------------------------------------------------------
-# Schmertmann (1978) — Immediate Settlement
-# ---------------------------------------------------------------------------
-
-def schmertmann_Es_from_N(N_corrected, soil_type="sand"):
-    """
-    Estimate elastic modulus Es (kPa) from corrected SPT N (Schmertmann 1978).
-    Sand  : Es = 500  × (N + 15)
-    Gravel: Es = 1000 × (N + 15)
-    Cite: Schmertmann et al. (1978); Meyerhof (1956)
-    """
-    N = max(1, int(N_corrected)) if N_corrected else 5
-    if soil_type.lower() in ("gravel", "gw", "gp", "gm", "gc"):
-        return 1000.0 * (N + 15)
-    return 500.0 * (N + 15)  # default: sand
-
-
-def strain_influence_factor(z, B, L=None, footing_type="square", Iz_peak=0.6):
-    """
-    Schmertmann et al. (1978) strain influence factor Iz at depth z below footing.
-
-    For square / circular footings (default):
-      z1 = 0.5·B  (depth to peak Iz)
-      z2 = 2.0·B  (depth where Iz → 0)
-      Iz = 0.1 + (Iz_peak - 0.1)·(z/z1)      for z ≤ z1
-      Iz = Iz_peak·(z2 - z)/(z2 - z1)         for z1 < z ≤ z2
-      Iz = 0                                    for z > z2
-
-    For strip footings (L/B → ∞):
-      z1 = B, z2 = 4·B
-
-    Parameters
-    ----------
-    z : float
-        Depth below footing base (m).
-    B : float
-        Footing width (m).
-    L : float or None
-        Footing length (m); used only to decide strip vs. square.
-    footing_type : str
-        "square" or "strip".
-    Iz_peak : float
-        Peak influence factor (default 0.6; corrected externally via pressure ratio).
-
-    Returns
-    -------
-    float — Iz (dimensionless, 0 to Iz_peak).
-    Cite: Schmertmann et al. (1978) Fig. 4
-    """
-    if L is not None and L / B >= 10:
-        footing_type = "strip"
-    if footing_type == "strip":
-        z1, z2 = B, 4.0 * B
-    else:
-        z1, z2 = 0.5 * B, 2.0 * B
-
-    if z <= 0:
-        return 0.1
-    if z <= z1:
-        return 0.1 + (Iz_peak - 0.1) * (z / z1)
-    if z <= z2:
-        return Iz_peak * (z2 - z) / (z2 - z1)
-    return 0.0
-
-
-def schmertmann_settlement(layers, Df, B, L, P_kN, wt_design_bgl, t_years=50):
-    """
-    Schmertmann et al. (1978) strain influence factor method for immediate
-    settlement of footings on granular (sand/gravel) layers.
-
-    Steps
-    -----
-    1. Net foundation pressure: Δp
-    2. C1 = 1 - 0.5·(σ′v0/Δp) ≥ 0.5          [embedment correction]
-    3. C2 = 1 + 0.2·log10(t_years/0.1)         [creep correction]
-    4. Divide soil below footing into sublayers of ≤ 0.5 m (granular only)
-    5. For each sublayer at mid-depth z_mid:
-       a. σ′v at z=0.5B below footing → compute Iz_peak
-          Iz_peak = 0.5 + 0.1·√(Δp / σ′v_halfB)
-       b. Iz at sublayer mid using strain_influence_factor with scaled Iz_peak
-       c. Es from N_corrected of that layer
-       d. Contribution: (Iz / Es) · Δz
-    6. S_i = C1 × C2 × Δp × Σ(Iz/Es·Δz)  in metres
-
-    Returns
-    -------
-    dict with keys: S_mm, C1, C2, delta_p, sublayer_data (list of dicts)
-    Cite: Schmertmann et al. (1978); IS 8009 Part 1
-    """
-    delta_p = _net_foundation_pressure(layers, Df, B, L, P_kN, wt_design_bgl)
-    sigma_v0 = _effective_stress_at(layers, Df, wt_design_bgl)   # at footing base
-
-    C1 = max(0.5, 1.0 - 0.5 * (sigma_v0 / delta_p))
-    C2 = 1.0 + 0.2 * np.log10(max(t_years, 0.1) / 0.1)
-
-    # Iz_peak depends on effective stress at z = 0.5B below footing base
-    sigma_v_halfB = _effective_stress_at(layers, Df + 0.5 * B, wt_design_bgl)
-    if sigma_v_halfB > 0 and delta_p > 0:
-        Iz_peak = 0.5 + 0.1 * np.sqrt(delta_p / sigma_v_halfB)
-    else:
-        Iz_peak = 0.6
-
-    # Determine influence zone depth (2B for square)
-    is_strip = (L / B >= 10)
-    z_max_influence = (4.0 * B) if is_strip else (2.0 * B)
-
-    sublayer_data = []
-    sum_Iz_Es_dz = 0.0
-    sub_thick = 0.5  # m
-
-    # Iterate over layers that fall within [Df, Df + z_max_influence]
-    z_start = Df
-    z_end = Df + z_max_influence
-
-    for lyr in layers:
-        lyr_top = lyr["depth_top"]
-        lyr_bot = lyr["depth_bot"]
-
-        # Intersect with [z_start, z_end]
-        seg_top = max(lyr_top, z_start)
-        seg_bot = min(lyr_bot, z_end)
-        if seg_top >= seg_bot:
-            continue
-
-        # Skip clay layers (consolidation handles them)
-        if lyr.get("is_clay", False):
-            continue
-        symbol = lyr.get("symbol", "SM")
-
-        N_corr = lyr.get("N_corrected") or lyr.get("N_field") or 10
-        soil_type = "gravel" if symbol in ("GW", "GP", "GM", "GC") else "sand"
-        Es = schmertmann_Es_from_N(N_corr, soil_type=soil_type)
-
-        # Divide this segment into sub-layers
-        z = seg_top
-        while z < seg_bot:
-            dz = min(sub_thick, seg_bot - z)
-            z_mid_bgl = z + dz / 2.0
-            z_mid = z_mid_bgl - Df  # depth below footing
-
-            Iz = strain_influence_factor(z_mid, B, L, Iz_peak=Iz_peak,
-                                         footing_type="strip" if is_strip else "square")
-            if Iz <= 0:
-                z += dz
+        for lyr in profile.layers:
+            seg_top = max(lyr.depth_top, z_start)
+            seg_bot = min(lyr.depth_bot, z_end)
+            if seg_top >= seg_bot:
+                continue
+            # Only granular (non-clay) layers contribute to immediate Schmertmann settlement
+            if lyr.is_clay:
                 continue
 
-            contrib = (Iz / Es) * dz
-            sum_Iz_Es_dz += contrib
-            sublayer_data.append({
-                "z_top_m": round(z - Df, 3),
-                "z_bot_m": round(z + dz - Df, 3),
-                "z_mid_m": round(z_mid, 3),
-                "layer_name": lyr.get("name", symbol),
-                "symbol": symbol,
-                "Es_kPa": round(Es, 1),
-                "Iz": round(Iz, 4),
-                "Iz_over_Es": round(Iz / Es, 8),
-                "dz_m": round(dz, 3),
-                "contrib_m": round(contrib, 8),
-            })
-            z += dz
+            Es = self.modulus.estimate_Es_kPa(lyr)
+            z = seg_top
+            while z < seg_bot - 1e-12:
+                dz = min(self.max_sublayer_thickness_m, seg_bot - z)
+                z_mid_bgl = z + 0.5 * dz
+                z_mid = z_mid_bgl - footing.Df
 
-    S_i_m = C1 * C2 * delta_p * sum_Iz_Es_dz
-    return {
-        "S_mm": round(S_i_m * 1000, 2),
-        "C1": round(C1, 4),
-        "C2": round(C2, 4),
-        "delta_p": round(delta_p, 2),
-        "Iz_peak": round(Iz_peak, 4),
-        "sigma_v0": round(sigma_v0, 2),
-        "sublayer_data": sublayer_data,
-    }
+                Iz = self.influence.Iz_at(z_mid, footing, Iz_peak)
+                if Iz <= 0.0:
+                    z += dz
+                    continue
+
+                # Sublayer contribution (Iz / Es) * Δz — Schmertmann et al. (1978) Eq. 1
+                contrib = (Iz / Es) * dz
+                sum_iz_over_es_dz += contrib
+                sublayers.append(
+                    SchmertmannSublayerResult(
+                        z_top_m=z - footing.Df,
+                        z_bot_m=(z + dz) - footing.Df,
+                        z_mid_m=z_mid,
+                        layer_name=lyr.name,
+                        symbol=lyr.symbol,
+                        Es_kPa=Es,
+                        Iz=Iz,
+                        Iz_over_Es=Iz / Es,
+                        dz_m=dz,
+                        contrib_m=contrib,
+                    )
+                )
+                z += dz
+
+        # Total immediate settlement Si (m) = C1 * C2 * Δp * Σ(Iz/Es * Δz)
+        # Cite: Schmertmann et al. (1978) Eq. 1; Das (2016) Eq. 5.50
+        S_i_m = C1 * C2 * delta_p * sum_iz_over_es_dz
+
+        return SchmertmannResult(
+            S_mm=S_i_m * 1000.0,
+            C1=C1,
+            C2=C2,
+            delta_p_kPa=delta_p,
+            Iz_peak=Iz_peak,
+            sigma_v0_kPa=sigma_v0,
+            sublayers=tuple(sublayers),
+        )
 
 
 # ---------------------------------------------------------------------------
-# 1D Consolidation Settlement — Terzaghi (1943)
+# 1D Consolidation Settlement Calculator — Terzaghi (1943) / IS 8009:1976
 # ---------------------------------------------------------------------------
-
-def consolidation_settlement_layer(H_m, e0, Cc, Cr, sigma_v0_kPa, Pc_kPa, delta_sigma_kPa):
+class ConsolidationSettlementCalculator:
     """
-    1D consolidation settlement for a single clay sublayer (Terzaghi 1943).
+    Computes 1D primary consolidation settlement S_c for NC, OC, and OC→NC
+    clay sublayers (<= 0.5 m thick) using an injected `StressDistributionModel`.
 
-    Case 1 — Normally consolidated (σ′v0 ≥ Pc):
-        Sc = Cc/(1+e0) × H × log10((σ′v0 + Δσ) / σ′v0)
-
-    Case 2 — Overconsolidated, stays OC (σ′v0 + Δσ ≤ Pc):
-        Sc = Cr/(1+e0) × H × log10((σ′v0 + Δσ) / σ′v0)
-
-    Case 3 — Overconsolidated, crosses preconsolidation pressure:
-        Sc = Cr/(1+e0) × H × log10(Pc / σ′v0)
-           + Cc/(1+e0) × H × log10((σ′v0 + Δσ) / Pc)
-
-    Returns (Sc_m, case_label)
-    Cite: Terzaghi (1943); Das (2016) Eq. 7.21-7.23
+    Cite: Terzaghi (1943); IS 8009:1976 Part 1 Cl. 5; Das (2016) Eq. 7.21–7.23
     """
-    sigma_f = sigma_v0_kPa + delta_sigma_kPa
-    factor = H_m / (1.0 + e0)
 
-    if sigma_v0_kPa <= 0 or sigma_f <= sigma_v0_kPa:
-        return 0.0, "No load"
+    def __init__(
+        self,
+        stress_model: StressDistributionModel | None = None,
+        max_sublayer_thickness_m: float = 0.5,
+    ) -> None:
+        if max_sublayer_thickness_m <= 0.0 or max_sublayer_thickness_m > 0.5:
+            raise ValueError("max_sublayer_thickness_m must lie in (0.0, 0.5] m.")
+        self.stress_model = stress_model or BoussinesqCentreModel()
+        self.max_sublayer_thickness_m = max_sublayer_thickness_m
 
-    # Normally consolidated
-    if sigma_v0_kPa >= Pc_kPa:
-        Sc = Cc * factor * np.log10(sigma_f / sigma_v0_kPa)
-        return Sc, "NC"
+    @staticmethod
+    def compute_sublayer(
+        H_m: float,
+        e0: float,
+        Cc: float,
+        Cr: float,
+        sigma_v0_kPa: float,
+        Pc_kPa: float,
+        delta_sigma_kPa: float,
+    ) -> tuple[float, ConsolidationRegime]:
+        """
+        Compute 1D consolidation settlement (m) of one clay sublayer of thickness H_m.
 
-    # Overconsolidated — stays OC
-    if sigma_f <= Pc_kPa:
-        Sc = Cr * factor * np.log10(sigma_f / sigma_v0_kPa)
-        return Sc, "OC"
+        Cite: Terzaghi (1943); Das (2016) Eq. 7.21–7.23; IS 8009:1976 Part 1 Cl. 5
+        """
+        sigma_f = sigma_v0_kPa + delta_sigma_kPa
+        factor = H_m / (1.0 + e0)
 
-    # Crosses preconsolidation pressure (OC → NC)
-    Sc = (Cr * factor * np.log10(Pc_kPa / sigma_v0_kPa) +
-          Cc * factor * np.log10(sigma_f / Pc_kPa))
-    return Sc, "OC→NC"
+        if sigma_v0_kPa <= 0.0 or sigma_f <= sigma_v0_kPa:
+            return 0.0, "No load"
 
+        if sigma_v0_kPa >= Pc_kPa:
+            # Case 1 — Normally Consolidated (σ′v0 >= Pc): Das (2016) Eq. 7.21
+            sc = Cc * factor * math.log10(sigma_f / sigma_v0_kPa)
+            return sc, "NC"
 
-def total_consolidation_settlement(layers, Df, B, L, P_kN, wt_design_bgl,
-                                   sublayer_thickness=0.5):
-    """
-    Total 1D consolidation settlement below a rectangular footing.
+        if sigma_f <= Pc_kPa:
+            # Case 2 — Overconsolidated remaining OC (σ′v0 + Δσ <= Pc): Das (2016) Eq. 7.22
+            sc = Cr * factor * math.log10(sigma_f / sigma_v0_kPa)
+            return sc, "OC"
 
-    Steps
-    -----
-    1. Net foundation pressure Δp
-    2. For each clay layer below the footing, divide into sublayers ≤ 0.5 m
-    3. For each sublayer at mid-depth z_mid (bgl):
-       a. σ′v0 = effective vertical stress at z_mid
-       b. Δσ = Boussinesq centre stress increase at depth (z_mid - Df)
-       c. Sc from consolidation_settlement_layer(...)
-    4. Sum all Sc over clay sublayers
+        # Case 3 — Overconsolidated crossing Pc (σ′v0 < Pc < σ′v0 + Δσ): Das (2016) Eq. 7.23
+        sc = (
+            Cr * factor * math.log10(Pc_kPa / sigma_v0_kPa)
+            + Cc * factor * math.log10(sigma_f / Pc_kPa)
+        )
+        return sc, "OC→NC"
 
-    Returns
-    -------
-    dict with keys: S_total_mm, sublayer_data (list of dicts)
-    Cite: IS 8009:1976 Part 1 Cl. 5
-    """
-    delta_p = _net_foundation_pressure(layers, Df, B, L, P_kN, wt_design_bgl)
-
-    sublayer_data = []
-    S_total = 0.0
-
-    for lyr in layers:
-        if not lyr.get("is_clay", False):
-            continue
-        Cc = lyr.get("Cc") or 0.3
-        Cr = lyr.get("Cr") or 0.06
-        e0 = lyr.get("e0") or 0.9
-        Pc = lyr.get("Pc_kPa") or 100.0
-
-        lyr_top = max(lyr["depth_top"], Df)
-        lyr_bot = lyr["depth_bot"]
-        if lyr_top >= lyr_bot:
-            continue
-
-        z = lyr_top
-        while z < lyr_bot:
-            dz = min(sublayer_thickness, lyr_bot - z)
-            z_mid_bgl = z + dz / 2.0
-            z_below_footing = z_mid_bgl - Df  # depth below footing base
-
-            sigma_v0 = _effective_stress_at(layers, z_mid_bgl, wt_design_bgl)
-            delta_sigma = stress_increase_centre(delta_p, B, L, z_below_footing)
-
-            Sc, case = consolidation_settlement_layer(
-                dz, e0, Cc, Cr, sigma_v0, Pc, delta_sigma
+    def calculate(
+        self,
+        profile: SoilProfile,
+        footing: FootingGeometry,
+        load: FoundationLoad,
+        wt_design_bgl: float | None = None,
+        sublayer_thickness: float | None = None,
+    ) -> ConsolidationResult:
+        dz_limit = (
+            float(sublayer_thickness)
+            if sublayer_thickness is not None
+            else self.max_sublayer_thickness_m
+        )
+        if dz_limit <= 0.0 or dz_limit > 0.5:
+            raise ValueError(
+                f"sublayer_thickness ({dz_limit} m) must satisfy 0 < dz <= 0.5 m per spec."
             )
-            S_total += Sc
-            sublayer_data.append({
-                "z_mid_bgl_m": round(z_mid_bgl, 3),
-                "z_below_footing_m": round(z_below_footing, 3),
-                "layer_name": lyr.get("name", lyr.get("symbol", "Clay")),
-                "sigma_v0_kPa": round(sigma_v0, 2),
-                "delta_sigma_kPa": round(delta_sigma, 2),
-                "sigma_f_kPa": round(sigma_v0 + delta_sigma, 2),
-                "Pc_kPa": round(Pc, 2),
-                "case": case,
-                "Sc_mm": round(Sc * 1000, 3),
-                "dz_m": round(dz, 3),
-            })
-            z += dz
 
-    return {
-        "S_total_mm": round(S_total * 1000, 2),
-        "sublayer_data": sublayer_data,
-    }
+        delta_p = compute_net_foundation_pressure(
+            profile, footing, load, wt_design_bgl=wt_design_bgl
+        )
+        sublayers: list[ConsolidationSublayerResult] = []
+        s_total_m = 0.0
+
+        for lyr in profile.layers:
+            if not lyr.is_clay:
+                continue
+            params = lyr.consolidation_params
+            if params is None:
+                continue
+
+            lyr_top = max(lyr.depth_top, footing.Df)
+            lyr_bot = lyr.depth_bot
+            if lyr_top >= lyr_bot:
+                continue
+
+            z = lyr_top
+            while z < lyr_bot - 1e-12:
+                dz = min(dz_limit, lyr_bot - z)
+                z_mid_bgl = z + 0.5 * dz
+                z_below_footing = z_mid_bgl - footing.Df
+
+                sigma_v0 = profile.effective_vertical_stress(
+                    z_mid_bgl, wt_bgl=wt_design_bgl
+                )
+                # Stress increment Δσz at clay sublayer midpoint — Das (2016) Eq. 5.37 / Sec. 5.5
+                delta_sigma = float(
+                    self.stress_model.delta_sigma(
+                        delta_p, footing.B, footing.L, z_below_footing
+                    )
+                )
+
+                sc_m, regime = self.compute_sublayer(
+                    dz, params.e0, params.Cc, params.Cr, sigma_v0, params.Pc_kPa, delta_sigma
+                )
+                s_total_m += sc_m
+                sublayers.append(
+                    ConsolidationSublayerResult(
+                        z_mid_bgl_m=z_mid_bgl,
+                        z_below_footing_m=z_below_footing,
+                        layer_name=lyr.name,
+                        sigma_v0_kPa=sigma_v0,
+                        delta_sigma_kPa=delta_sigma,
+                        sigma_f_kPa=sigma_v0 + delta_sigma,
+                        Pc_kPa=params.Pc_kPa,
+                        case=regime,
+                        Sc_mm=sc_m * 1000.0,
+                        dz_m=dz,
+                    )
+                )
+                z += dz
+
+        return ConsolidationResult(
+            S_total_mm=s_total_m * 1000.0,
+            sublayers=tuple(sublayers),
+        )
 
 
 # ---------------------------------------------------------------------------
-# Terzaghi consolidation theory
+# Terzaghi Time-Rate Consolidation Model
 # ---------------------------------------------------------------------------
+class TimeRateConsolidationModel:
+    """
+    Terzaghi (1943) 1D time-rate consolidation solver.
 
-def degree_of_consolidation(Tv):
+    Cite: Terzaghi (1943); Das (2016) Eq. 7.56–7.57; IS 8009:1976 Part 1
+    """
+
+    @staticmethod
+    def drainage_path(H_clay_m: float, drainage: DrainageCondition) -> float:
+        """
+        Compute maximum drainage path Hdr (m):
+          - "one-way" (single drainage) : Hdr = H
+          - "two-way" (double drainage) : Hdr = H / 2
+
+        Cite: Terzaghi (1943); Das (2016) Sec. 7.11
+        """
+        if H_clay_m <= 0.0:
+            raise ValueError("H_clay_m must be > 0 m.")
+        if drainage == "two-way":
+            return 0.5 * H_clay_m
+        if drainage == "one-way":
+            return float(H_clay_m)
+        raise ValueError(f"Unknown drainage condition '{drainage}'. Use 'one-way' or 'two-way'.")
+
+    @staticmethod
+    def time_factor(cv_m2s: float, t_seconds: float, Hdr_m: float) -> float:
+        """
+        Dimensionless time factor Tv = (cv · t) / Hdr².
+
+        Cite: Terzaghi (1943); Das (2016) Eq. 7.49; IS 8009:1976 Part 1
+        """
+        if Hdr_m <= 0.0 or t_seconds <= 0.0 or cv_m2s <= 0.0:
+            return 0.0
+        # Terzaghi (1943); Das (2016) Eq. 7.49: Tv = cv * t / Hdr²
+        return float(cv_m2s) * float(t_seconds) / (float(Hdr_m) ** 2)
+
+    @staticmethod
+    def degree_of_consolidation(Tv: float | np.ndarray) -> float | np.ndarray:
+        """
+        Average degree of consolidation U(Tv) in [0, 1]:
+          - For U <= 0.60 (Tv <= π/4 · 0.6² ≈ 0.2827): U = sqrt(4·Tv / π)
+          - For U >  0.60 (Tv >  0.2827):              U = 1 − (8 / π²) · exp(−π²·Tv / 4)
+
+        Cite: Terzaghi (1943); Das (2016) Eq. 7.56–7.57
+        """
+        # Threshold Tv_crit = (π/4) * 0.60² ≈ 0.282743 — Das (2016) Eq. 7.56
+        if np.isscalar(Tv):
+            tv_val = max(0.0, float(Tv))
+            u_low = math.sqrt(4.0 * tv_val / math.pi)  # Das (2016) Eq. 7.56
+            if u_low <= 0.60:
+                return min(max(u_low, 0.0), 1.0)
+            # Das (2016) Eq. 7.57 (single-term Fourier series for U > 60%)
+            u_high = 1.0 - (8.0 / (math.pi ** 2)) * math.exp(-(math.pi ** 2) * tv_val / 4.0)
+            return min(max(u_high, 0.0), 1.0)
+
+        tv_arr = np.maximum(np.asarray(Tv, dtype=float), 0.0)
+        u_low = np.sqrt(4.0 * tv_arr / np.pi)  # Das (2016) Eq. 7.56
+        u_high = 1.0 - (8.0 / (np.pi ** 2)) * np.exp(-(np.pi ** 2) * tv_arr / 4.0)  # Das (2016) Eq. 7.57
+        u = np.where(u_low <= 0.60, u_low, u_high)
+        return np.clip(u, 0.0, 1.0)
+
+    def generate_curve(
+        self,
+        Sc_total_m: float,
+        cv_m2s: float,
+        Hdr_m: float,
+        t_max_years: float = 50.0,
+        n_points: int = 200,
+        drainage: DrainageCondition = "two-way",
+    ) -> TimeSettlementResult:
+        """
+        Generate S(t) = U(Tv(t)) · Sc_total curve over [0, t_max_years].
+
+        Cite: Terzaghi (1943); IS 8009:1976 Part 1
+        """
+        t_years = np.linspace(0.0, float(t_max_years), n_points)
+        t_seconds = t_years * SECONDS_PER_YEAR
+        if Hdr_m <= 0.0:
+            tv = np.zeros_like(t_seconds)
+        else:
+            # Das (2016) Eq. 7.49: Tv = cv * t / Hdr²
+            tv = float(cv_m2s) * t_seconds / (float(Hdr_m) ** 2)
+        u = np.asarray(self.degree_of_consolidation(tv), dtype=float)
+        # S(t) = U(t) * Sc_ultimate — Das (2016) Eq. 7.47
+        s_mm = u * float(Sc_total_m) * 1000.0
+        return TimeSettlementResult(
+            t_years=t_years,
+            U=u,
+            S_mm=s_mm,
+            Hdr_m=float(Hdr_m),
+            cv_m2s=float(cv_m2s),
+            drainage=drainage,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Functional Facade (100% Backward-Compatible with Streamlit P5 UI)
+# ---------------------------------------------------------------------------
+_SCHMERTMANN_CALC = SchmertmannSettlementCalculator()
+_CONSOLIDATION_CALC = ConsolidationSettlementCalculator()
+_TIME_RATE_MODEL = TimeRateConsolidationModel()
+
+
+def schmertmann_Es_from_N(
+    N_corrected: int | float | None, soil_type: str = "sand"
+) -> float:
+    """
+    Estimate elastic modulus Es (kPa) from corrected SPT N.
+
+    Cite: Meyerhof (1956); Schmertmann et al. (1978); Das (2016) Table 5.6
+    """
+    return SchmertmannModulusCorrelation.from_N(N_corrected, soil_type=soil_type)
+
+
+def strain_influence_factor(
+    z: float,
+    B: float,
+    L: float | None = None,
+    footing_type: str = "square",
+    Iz_peak: float = 0.6,
+) -> float:
+    """
+    Schmertmann et al. (1978) bilinear strain influence factor Iz(z).
+
+    Cite: Schmertmann et al. (1978) Fig. 4
+    """
+    l_eff = float(L) if L is not None else (10.0 * float(B) if footing_type == "strip" else float(B))
+    shape = "strip" if (footing_type == "strip" or l_eff / float(B) >= 10.0) else "square"
+    footing = FootingGeometry(B=float(B), L=l_eff, Df=0.0, shape=shape)
+    return _SCHMERTMANN_CALC.influence.Iz_at(float(z), footing, float(Iz_peak))
+
+
+def schmertmann_settlement(
+    layers: Sequence[Mapping[str, Any]],
+    Df: float,
+    B: float,
+    L: float,
+    P_kN: float,
+    wt_design_bgl: float,
+    t_years: float = 50.0,
+) -> dict[str, Any]:
+    """
+    Schmertmann et al. (1978) immediate settlement for granular layers.
+
+    Cite: Schmertmann et al. (1978) Eq. 1–4; IS 8009:1976 Part 1
+    """
+    profile = SoilProfile.from_dicts(layers, wt_design_bgl=wt_design_bgl)
+    shape = "strip" if L / B >= 10.0 else ("square" if abs(L - B) < 1e-9 else "rectangular")
+    footing = FootingGeometry(B=float(B), L=float(L), Df=float(Df), shape=shape)
+    load = FoundationLoad(P_kN=float(P_kN))
+    return _SCHMERTMANN_CALC.calculate(
+        profile, footing, load, wt_design_bgl=wt_design_bgl, t_years=t_years
+    ).to_dict()
+
+
+def consolidation_settlement_layer(
+    H_m: float,
+    e0: float,
+    Cc: float,
+    Cr: float,
+    sigma_v0_kPa: float,
+    Pc_kPa: float,
+    delta_sigma_kPa: float,
+) -> tuple[float, ConsolidationRegime]:
+    """
+    1D consolidation settlement (m) for a single clay sublayer.
+
+    Cite: Terzaghi (1943); Das (2016) Eq. 7.21–7.23
+    """
+    return ConsolidationSettlementCalculator.compute_sublayer(
+        H_m, e0, Cc, Cr, sigma_v0_kPa, Pc_kPa, delta_sigma_kPa
+    )
+
+
+def total_consolidation_settlement(
+    layers: Sequence[Mapping[str, Any]],
+    Df: float,
+    B: float,
+    L: float,
+    P_kN: float,
+    wt_design_bgl: float,
+    sublayer_thickness: float = 0.5,
+) -> dict[str, Any]:
+    """
+    Total 1D consolidation settlement across clay sublayers (<= 0.5 m thick).
+
+    Cite: IS 8009:1976 Part 1 Cl. 5; Terzaghi (1943)
+    """
+    profile = SoilProfile.from_dicts(layers, wt_design_bgl=wt_design_bgl)
+    shape = "strip" if L / B >= 10.0 else ("square" if abs(L - B) < 1e-9 else "rectangular")
+    footing = FootingGeometry(B=float(B), L=float(L), Df=float(Df), shape=shape)
+    load = FoundationLoad(P_kN=float(P_kN))
+    return _CONSOLIDATION_CALC.calculate(
+        profile,
+        footing,
+        load,
+        wt_design_bgl=wt_design_bgl,
+        sublayer_thickness=sublayer_thickness,
+    ).to_dict()
+
+
+def degree_of_consolidation(Tv: float | np.ndarray) -> float | np.ndarray:
     """
     Terzaghi (1943) average degree of consolidation U vs time factor Tv.
-    For Tv giving U ≤ 0.60: U = √(4·Tv/π)
-    For Tv giving U > 0.60: U = 1 - (8/π²)·exp(-π²·Tv/4)
 
-    Solve iteratively: use approximation boundary at Tv ≈ 0.2171 (U=0.6).
-    Returns U in range [0, 1].
-    Cite: Terzaghi (1943); Das (2016) Eq. 7.56-7.57
+    Cite: Terzaghi (1943); Das (2016) Eq. 7.56–7.57
     """
-    if np.isscalar(Tv):
-        Tv = float(Tv)
-        U_approx = np.sqrt(4.0 * Tv / np.pi)
-        if U_approx <= 0.60:
-            return float(np.clip(U_approx, 0, 1))
-        return float(np.clip(1.0 - (8.0 / np.pi ** 2) * np.exp(-np.pi ** 2 * Tv / 4.0), 0, 1))
-    else:
-        Tv = np.asarray(Tv, dtype=float)
-        U = np.empty_like(Tv)
-        U_approx = np.sqrt(4.0 * Tv / np.pi)
-        mask = U_approx <= 0.60
-        U[mask] = U_approx[mask]
-        U[~mask] = 1.0 - (8.0 / np.pi ** 2) * np.exp(-np.pi ** 2 * Tv[~mask] / 4.0)
-        return np.clip(U, 0, 1)
+    return TimeRateConsolidationModel.degree_of_consolidation(Tv)
 
 
-def time_factor(cv_m2s, t_seconds, Hdr_m):
+def time_factor(cv_m2s: float, t_seconds: float, Hdr_m: float) -> float:
     """
-    Time factor  Tv = cv × t / Hdr²
-    Hdr = drainage path length (m):
-        One-way drainage: Hdr = H (full layer thickness)
-        Two-way drainage: Hdr = H/2
+    Dimensionless time factor Tv = cv * t / Hdr².
 
-    Parameters
-    ----------
-    cv_m2s : float
-        Coefficient of consolidation (m²/s).
-    t_seconds : float
-        Elapsed time (seconds).
-    Hdr_m : float
-        Drainage path length (m).
-
-    Returns Tv (dimensionless).
-    Cite: Terzaghi (1943); IS 8009:1976
+    Cite: Terzaghi (1943); Das (2016) Eq. 7.49; IS 8009:1976 Part 1
     """
-    if Hdr_m <= 0:
-        return 0.0
-    return float(cv_m2s) * float(t_seconds) / (float(Hdr_m) ** 2)
+    return TimeRateConsolidationModel.time_factor(cv_m2s, t_seconds, Hdr_m)
 
 
-def time_settlement_curve(Sc_total_m, cv_m2s, Hdr_m, t_max_years=50, n_points=200):
+def time_settlement_curve(
+    Sc_total_m: float,
+    cv_m2s: float,
+    Hdr_m: float,
+    t_max_years: float = 50.0,
+    n_points: int = 200,
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Generate a time–settlement curve using Terzaghi consolidation theory.
+    Generate (t_years_array, S_mm_array) using Terzaghi 1D consolidation theory.
 
-    Parameters
-    ----------
-    Sc_total_m : float
-        Ultimate consolidation settlement (m).
-    cv_m2s : float
-        Coefficient of consolidation (m²/s).
-    Hdr_m : float
-        Drainage path length (m).
-    t_max_years : float
-        Maximum time to plot (years).
-    n_points : int
-        Number of evaluation points.
-
-    Returns
-    -------
-    t_years_array : np.ndarray
-        Time values (years), from 0 to t_max_years.
-    S_mm_array : np.ndarray
-        Corresponding settlement values (mm).
-    Cite: Terzaghi (1943) consolidation theory
+    Cite: Terzaghi (1943); IS 8009:1976 Part 1
     """
-    t_years_array = np.linspace(0.0, t_max_years, n_points)
-    SECONDS_PER_YEAR = 365.25 * 24 * 3600
-
-    S_mm_array = np.empty(n_points)
-    for i, t_yr in enumerate(t_years_array):
-        t_sec = t_yr * SECONDS_PER_YEAR
-        Tv = time_factor(cv_m2s, t_sec, Hdr_m)
-        U = degree_of_consolidation(Tv)
-        S_mm_array[i] = U * Sc_total_m * 1000.0
-
-    return t_years_array, S_mm_array
+    res = _TIME_RATE_MODEL.generate_curve(
+        Sc_total_m=Sc_total_m,
+        cv_m2s=cv_m2s,
+        Hdr_m=Hdr_m,
+        t_max_years=t_max_years,
+        n_points=n_points,
+    )
+    return res.t_years, res.S_mm
