@@ -58,23 +58,13 @@ def _layer_at_depth(layers, z_bgl):
 
 def _net_foundation_pressure(layers, Df, B, L, P_kN, wt_design_bgl):
     """
-    Net foundation pressure Δp = P / (B×L) - γ_avg × Df (kPa).
-    γ_avg = weighted average unit weight of soil above footing base.
+    Net foundation pressure Δp = P / (B×L) - σ′v0(Df) (kPa).
+    The existing effective overburden uses moist unit weight above the design
+    water table and submerged unit weight below it.
     """
     q_gross = P_kN / (B * L)
-    # weighted average unit weight above Df
-    total_weight = 0.0
-    total_depth = 0.0
-    for lyr in layers:
-        if lyr["depth_top"] >= Df:
-            break
-        z_top = lyr["depth_top"]
-        z_bot = min(lyr["depth_bot"], Df)
-        dz = z_bot - z_top
-        total_weight += lyr.get("gamma_moist", 18.0) * dz
-        total_depth += dz
-    gamma_avg = total_weight / total_depth if total_depth > 0 else 18.0
-    delta_p = q_gross - gamma_avg * Df
+    q_surcharge = _effective_stress_at(layers, Df, wt_design_bgl)
+    delta_p = q_gross - q_surcharge
     return max(delta_p, 1.0)  # must be positive
 
 
