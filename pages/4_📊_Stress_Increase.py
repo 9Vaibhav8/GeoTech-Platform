@@ -274,30 +274,33 @@ with st.expander("🔀 Superposition Tool — multiple loaded areas"):
 
 # ── Theory box ─────────────────────────────────────────────────────────────
 with st.expander("📖 Theory — Boussinesq Stress Increase"):
-    st.markdown(r"""
-### Boussinesq Rectangular Load (IS 8009:1976)
+    st.markdown("### Boussinesq Rectangular Load (IS 8009:1976)")
+    st.markdown(
+        "For a uniformly loaded rectangle $B \\times L$ with net pressure $q$ (kPa), "
+        "the vertical stress increase at depth $z$ below the **corner** is:"
+    )
+    st.latex(r"\Delta\sigma_z = q \, I_\sigma")
+    st.latex(
+        r"I_\sigma = \frac{1}{4\pi}\left[ "
+        r"\frac{2 m_1 n_1 \sqrt{1+m_1^2+n_1^2}}{1+m_1^2+n_1^2+m_1^2 n_1^2}"
+        r"\cdot\frac{2+m_1^2+n_1^2}{1+m_1^2+n_1^2} "
+        r"+ \tan^{-1}\!\left(\frac{2 m_1 n_1 \sqrt{1+m_1^2+n_1^2}}"
+        r"{1+m_1^2+n_1^2-m_1^2 n_1^2}\right) \right]"
+    )
+    st.markdown("where $m_1 = B/z$ and $n_1 = L/z$ *(Das 2016, Eq. 5.37)*.")
+    st.caption(
+        "Note: when $m_1^2 n_1^2 > 1 + m_1^2 + n_1^2$ the arctan argument goes negative; "
+        "add $\\pi$ to the arctan term (use `atan2` in code)."
+    )
 
-For a uniformly loaded rectangle $B \times L$ with net pressure $q$ (kPa),
-the vertical stress increase at depth $z$ below the **corner** is:
+    st.markdown("**Below the centre:** superpose 4 corner rectangles of size $(B/2 \\times L/2)$:")
+    st.latex(r"\Delta\sigma_{z,\text{centre}} = 4\,\Delta\sigma_{z,\text{corner}}(B/2,\ L/2,\ z)")
 
-$$\Delta\sigma_z = q \cdot I_\sigma$$
+    st.divider()
 
-$$I_\sigma = \frac{1}{4\pi}\left[
-  \frac{2m_1 n_1 \sqrt{1+m_1^2+n_1^2}}{1+m_1^2+n_1^2+m_1^2 n_1^2}
-  \cdot \frac{2+m_1^2+n_1^2}{1+m_1^2+n_1^2}
-  + \arctan\!\left(\frac{2m_1 n_1\sqrt{1+m_1^2+n_1^2}}{1+m_1^2+n_1^2-m_1^2 n_1^2}\right)
-\right]$$
-
-where $m_1 = B/z$, $n_1 = L/z$.   *(Das 2016, Eq. 5.37)*
-
-**Below the centre:** apply superposition of 4 corner rectangles $(B/2 \times L/2)$:
-$$\Delta\sigma_{z,\text{centre}} = 4 \times \Delta\sigma_{z,\text{corner}}(B/2,\, L/2,\, z)$$
-
----
-
-### 2:1 Method (IS 8009:1976)
-
-$$\Delta\sigma_z = \frac{q \cdot B \cdot L}{(B+z)(L+z)}$$
-
-Simpler but less accurate; tends to overestimate at shallow depths, underestimate at large depths.
-    """)
+    st.markdown("### 2:1 Method")
+    st.latex(r"\Delta\sigma_z = \frac{q\,B\,L}{(B+z)(L+z)}")
+    st.markdown(
+        "Simple approximate method that assumes the load spreads at 2 vertical : 1 horizontal. "
+        "It is less accurate than the Boussinesq solution, so check it against that result."
+    )
