@@ -41,7 +41,7 @@ def bearing_capacity_factors(phi_deg: float):
     else:
         Nc = (Nq - 1.0) / np.tan(phi_rad)
 
-    Ngamma = 1.5 * (Nq - 1.0) * np.tan(phi_rad)
+    Ngamma = 2.0 * (Nq + 1.0) * np.tan(phi_rad)
 
     return Nc, Nq, Ngamma
 
@@ -152,7 +152,7 @@ def inclination_factors(alpha_deg: float, phi_deg: float):
 
 def water_table_factor(Df: float, B: float, wt_bgl: float):
     """
-    IS 6403:1981 Cl. 5.2 — Water table correction factor W′ for Nγ term.
+    Cl. 5.1.2.3 in IS 6403:1981 — Water table correction factor W′ for Nγ term.
 
     W′ applies to the Nγ term (self-weight of soil below the footing base).
 
@@ -175,6 +175,7 @@ def water_table_factor(Df: float, B: float, wt_bgl: float):
     W_prime : float
         Correction factor (0.5 ≤ W′ ≤ 1.0).
     """
+    if B <= 0: raise ValueError("Footing width B must be positive.")
     if wt_bgl <= Df:
         return 0.5
     elif wt_bgl >= Df + B:
@@ -183,13 +184,12 @@ def water_table_factor(Df: float, B: float, wt_bgl: float):
         return 0.5 + 0.5 * (wt_bgl - Df) / B
 
 
-# ---------------------------------------------------------------------------
 # 6. Local Shear Parameters
-# ---------------------------------------------------------------------------
+
 
 def local_shear_params(c_prime: float, phi_prime_deg: float):
     """
-    IS 6403:1981 Cl. 5.3 — Local shear failure modification.
+    Cl. 5.1.3 in IS 6403:1981 — Local shear failure modification.
 
     Mobilised (reduced) strength parameters for local shear failure:
         c_local   = (2/3) · c′
@@ -211,9 +211,9 @@ def local_shear_params(c_prime: float, phi_prime_deg: float):
     return c_local, phi_local_deg
 
 
-# ---------------------------------------------------------------------------
+
 # 7. Net Ultimate Bearing Capacity
-# ---------------------------------------------------------------------------
+
 
 def net_ultimate_bearing_capacity(
     c_prime: float,
@@ -281,13 +281,7 @@ def net_ultimate_bearing_capacity(
     cu : float
         Undrained shear strength (kPa).  Used only when is_undrained=True.
 
-    Returns
-    -------
-    result : dict
-        Dictionary with keys:
-            Nc, Nq, Ngamma, sc, sq, sgamma, dc, dq, dgamma,
-            ic, iq, igamma, W_prime, q_eff, qf, qnu,
-            c_used, phi_used, B, L, footing_shape, failure_mode
+
     """
     # --- Adjust L for square/circular/strip ---------------------------------
     if footing_shape in ("square", "circular"):
@@ -310,46 +304,32 @@ def net_ultimate_bearing_capacity(
     # --- Bearing capacity factors -------------------------------------------
     Nc, Nq, Ngamma = bearing_capacity_factors(phi_used)
 
-    # --- Effective overburden at founding level (Nq term) -------------------
-    if wt_bgl >= Df:
+   # --- Effective overburden at founding level (IS 6403 Cl. 5.1.2) ---------
+    wt_eff = max(0.0, wt_bgl)
+    if wt_eff >= Df:
         q_eff = gamma_moist * Df
     else:
-        q_eff = gamma_moist * wt_bgl + (gamma_sat - GAMMA_W) * (Df - wt_bgl)
+        q_eff = gamma_moist * wt_eff + (gamma_sat - GAMMA_W) * (Df - wt_eff)
 
-    # --- Effective unit weight for Nγ term (below footing) ------------------
-    W_prime = water_table_factor(Df, B, wt_bgl)
+    # --- Water table correction factor W' (IS 6403 Cl. 5.1.2.3) -------------
+    W_prime = water_table_factor(Df, B, wt_eff)
 
-    # Effective γ below footing base for Nγ term
-    if wt_bgl <= Df:
-        gamma_eff = gamma_sat - GAMMA_W   # fully submerged below footing
-    else:
-        gamma_eff = gamma_moist            # WT deeper than footing base
-
-    # Apply W′ correction to the Nγ term: use W′ · gamma_eff
-    # (W′ already encodes interpolation; use directly with moist/sat)
-    # Per IS 6403:1981 Cl. 5.2: replace γ in Nγ term with
-    #   W′ · γ_moist + (1 - W′) · (γ_sat - γw) when WT between Df and Df+B
-    # Simplified: effective γ for Nγ term = (1 - W′)·(γ_sat - γw) + W′·γ_moist
-    gamma_ngamma = (1.0 - W_prime) * (gamma_sat - GAMMA_W) + W_prime * gamma_moist
-
-    # --- Shape, depth, inclination factors ----------------------------------
-    sc, sq, sgamma = shape_factors(B, L, phi_used)
+    # --- Shape, depth, inclination factors (IS 6403 Table 2 & Cl. 5.1.2.1) --
+    sc, sq, sgamma = shape_factors(footing_shape, B, L)
     dc, dq, dgamma = depth_factors(Df, B, phi_used)
     ic, iq, igamma = inclination_factors(alpha_deg, phi_used)
 
-    # --- Gross ultimate bearing capacity (IS 6403:1981 Eq. 1) ---------------
-    if is_undrained and phi_used == 0.0:
-        # φ=0: Nq=1, Nγ=0 (Skempton / IS 6403 for undrained)
-        qf = c_used * Nc * sc * dc * ic + q_eff * 1.0
-        qnu = c_used * Nc * sc * dc * ic   # net (subtract q)
-        # Override Nq and Ngamma for display
+    # --- Net & Gross ultimate bearing capacity (IS 6403:1981 Cl. 5.1.2) -----
+    if is_undrained and np.isclose(phi_used, 0.0):
+        qnu = c_used * Nc * sc * dc * ic
+        qf = qnu + q_eff
         Nq_disp, Ngamma_disp = 1.0, 0.0
     else:
-        c_term     = c_used     * Nc     * sc     * dc     * ic
-        q_term     = q_eff      * Nq     * sq     * dq     * iq
-        gamma_term = 0.5 * gamma_ngamma * B * Ngamma * sgamma * dgamma * igamma
-        qf = c_term + q_term + gamma_term
-        qnu = qf - q_eff
+        c_term     = c_used * Nc * sc * dc * ic
+        q_term     = q_eff * (Nq - 1.0) * sq * dq * iq
+        gamma_term = 0.5 * gamma_moist * B * Ngamma * sgamma * dgamma * igamma * W_prime
+        qnu = c_term + q_term + gamma_term
+        qf = qnu + q_eff
         Nq_disp, Ngamma_disp = Nq, Ngamma
 
     return {
@@ -373,9 +353,9 @@ def net_ultimate_bearing_capacity(
     }
 
 
-# ---------------------------------------------------------------------------
+
 # 8. Net Safe Bearing Capacity
-# ---------------------------------------------------------------------------
+
 
 def net_safe_bearing_capacity(qnu: float, FOS: float = 3.0):
     """
@@ -398,44 +378,37 @@ def net_safe_bearing_capacity(qnu: float, FOS: float = 3.0):
     return qnu / FOS
 
 
-# ---------------------------------------------------------------------------
 # 9. Effective Area (Eccentric Loading)
-# ---------------------------------------------------------------------------
+
 
 def effective_area(B: float, L: float, ex: float, ey: float):
     """
-    IS 6403:1981 Cl. 5.4 — Effective dimensions for eccentric loading.
+    IS 6403:1981 Cl. 5.0.1 — Effective dimensions for eccentric loading.
 
-    B_eff = B − 2 · ex   (eccentricity along short dimension B)
-    L_eff = L − 2 · ey   (eccentricity along long dimension L)
+    B_eff = B − 2 · |ex|   (eccentricity along width B)
+    L_eff = L − 2 · |ey|   (eccentricity along length L)
     A_eff = B_eff × L_eff
-
-    Parameters
-    ----------
-    B : float
-        Footing width (m).
-    L : float
-        Footing length (m).
-    ex : float
-        Eccentricity along B (m).
-    ey : float
-        Eccentricity along L (m).
-
-    Returns
-    -------
-    (B_eff, L_eff, A_eff) : tuple of float
-        Effective dimensions (m, m, m²).
     """
-    B_eff = B - 2.0 * ex
-    L_eff = L - 2.0 * ey
+    if B <= 0 or L <= 0:
+        raise ValueError("Footing dimensions B and L must be positive.")
+
+    B_eff = B - 2.0 * abs(ex)
+    L_eff = L - 2.0 * abs(ey)
+
+    if B_eff <= 0 or L_eff <= 0:
+        raise ValueError(
+            f"Eccentricity exceeds footing bounds (|ex| >= B/2 or |ey| >= L/2): "
+            f"B_eff={B_eff:.3f}, L_eff={L_eff:.3f}"
+        )
+
+    # Ensure B_eff <= L_eff for downstream shape/depth/Ngamma terms
+    B_eff, L_eff = min(B_eff, L_eff), max(B_eff, L_eff)
     A_eff = B_eff * L_eff
+
     return B_eff, L_eff, A_eff
 
 
-# ---------------------------------------------------------------------------
-# 10. Required Footing Size (Iterative)
-# ---------------------------------------------------------------------------
-
+# 10 Footing Size
 def required_footing_size(
     P_kN: float,
     c_prime: float,
@@ -446,103 +419,85 @@ def required_footing_size(
     wt_bgl: float,
     FOS: float = 3.0,
     footing_shape: str = "square",
+    aspect_ratio: float = 1.5,       # L/B for rectangular footings
     failure_mode: str = "general",
     alpha_deg: float = 0.0,
     is_undrained: bool = False,
     cu: float = 0.0,
-    n_iter: int = 10,
+    max_iter: int = 50,
+    tol: float = 1e-4,
 ):
+    """Iterative solution for required footing width B (and length L) per IS 6403:1981.
+    Note: For 'strip' footings, P_kN is interpreted as load per unit length (kN/m).
     """
-    IS 6403:1981 Cl. 6 — Iterative solution for required footing size.
+    if P_kN <= 0 or FOS <= 0:
+        raise ValueError("Load P_kN and FOS must be positive.")
 
-    For a square footing under axial load P (kN):
-        First estimate: B = √(P / qns)
-        qns depends on B → iterate n_iter times until convergence.
+    shape = footing_shape.lower()
+    if shape not in ("square", "circular", "rectangular", "strip"):
+        raise ValueError(f"Unsupported footing_shape: {footing_shape}")
 
-    Algorithm
-    ----------
-    1. Start with B = 1.0 m.
-    2. Compute qnu → qns = qnu / FOS.
-    3. Update B = √(P / qns).
-    4. Repeat for n_iter iterations.
-    5. Round B up to nearest 0.05 m.
+    def _area(b, l):
+        if shape == "circular":
+            return 0.25 * np.pi * b ** 2
+        elif shape == "strip":
+            return b  # per unit length (m²/m)
+        return b * l
 
-    Parameters
-    ----------
-    P_kN : float
-        Column (service) load (kN).
-    c_prime, phi_prime_deg, gamma_moist, gamma_sat : float
-        Soil parameters at founding level.
-    Df : float
-        Founding depth (m).
-    wt_bgl : float
-        Water table depth (m bgl).
-    FOS : float
-        Factor of safety (default 3.0).
-    footing_shape : str
-        "square", "rectangular", "circular", "strip".
-    failure_mode : str
-        "general" or "local".
-    alpha_deg : float
-        Load inclination (degrees).
-    is_undrained : bool
-        True → undrained analysis.
-    cu : float
-        Undrained shear strength (kPa).
-    n_iter : int
-        Number of iterations (default 10).
+    def _width_from_qns(qns):
+        if shape == "square":
+            return np.sqrt(P_kN / qns)
+        elif shape == "circular":
+            return np.sqrt(4.0 * P_kN / (np.pi * qns))
+        elif shape == "rectangular":
+            return np.sqrt(P_kN / (aspect_ratio * qns))
+        else:  # strip (P_kN in kN/m)
+            return P_kN / qns
 
-    Returns
-    -------
-    result : dict
-        {
-          "B": float,          # required width (m), rounded up to 0.05 m
-          "L": float,          # same as B for square footing
-          "qns": float,        # net safe bearing capacity (kPa) at final B
-          "qnu": float,        # net ultimate bearing capacity (kPa)
-          "actual_FOS": float, # qnu / (P / B²) — actual FOS
-        }
-    """
-    B = max(1.0, np.sqrt(P_kN / 150.0))  # first guess using 150 kPa as seed
+    def _length_from_B(b):
+        if shape in ("square", "circular"):
+            return b
+        elif shape == "rectangular":
+            return aspect_ratio * b
+        return 1e6  # strip
 
-    for _ in range(n_iter):
-        L_iter = B if footing_shape in ("square", "circular") else B * 1.5
+    B = max(1.0, _width_from_qns(150.0))
+
+    for _ in range(max_iter):
+        L_iter = _length_from_B(B)
         res = net_ultimate_bearing_capacity(
             c_prime=c_prime, phi_prime_deg=phi_prime_deg,
             gamma_moist=gamma_moist, gamma_sat=gamma_sat,
             Df=Df, B=B, L=L_iter, wt_bgl=wt_bgl,
-            footing_shape=footing_shape,
-            failure_mode=failure_mode,
-            alpha_deg=alpha_deg,
-            is_undrained=is_undrained,
-            cu=cu,
+            footing_shape=shape, failure_mode=failure_mode,
+            alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu,
         )
         qnu = res["qnu"]
-        qns = max(qnu / FOS, 1.0)   # avoid division by zero
-        B_new = np.sqrt(P_kN / qns)
+        if qnu <= 0:
+            raise ValueError(f"Non-positive bearing capacity (qnu={qnu:.2f} kPa); footing cannot be sized.")
+
+        qns = qnu / FOS
+        B_new = _width_from_qns(qns)
+        if abs(B_new - B) < tol:
+            B = B_new
+            break
         B = B_new
 
     # Round up to nearest 0.05 m
-    B_rounded = np.ceil(B / 0.05) * 0.05
-    L_final = B_rounded
+    B_rounded = float(np.ceil(B / 0.05) * 0.05)
+    L_final = _length_from_B(B_rounded)
 
-    # Final check with rounded B
     res_final = net_ultimate_bearing_capacity(
         c_prime=c_prime, phi_prime_deg=phi_prime_deg,
         gamma_moist=gamma_moist, gamma_sat=gamma_sat,
         Df=Df, B=B_rounded, L=L_final, wt_bgl=wt_bgl,
-        footing_shape=footing_shape,
-        failure_mode=failure_mode,
-        alpha_deg=alpha_deg,
-        is_undrained=is_undrained,
-        cu=cu,
+        footing_shape=shape, failure_mode=failure_mode,
+        alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu,
     )
     qnu_final = res_final["qnu"]
     qns_final = qnu_final / FOS
-
-    # Actual FOS = qnu / applied net pressure
-    applied_pressure = P_kN / (B_rounded ** 2)
-    actual_FOS = qnu_final / applied_pressure if applied_pressure > 0 else float("inf")
+    applied_pressure = P_kN / _area(B_rounded, L_final)
+    actual_FOS = qnu_final / applied_pressure
 
     return {
         "B": B_rounded,
