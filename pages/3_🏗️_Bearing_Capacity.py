@@ -225,7 +225,7 @@ with st.expander("🔍 Intermediate Values (IS 6403:1981 Factors)", expanded=Fal
             "ic (incl., c-term)", "iq (incl., q-term)", "iγ (incl., γ-term)",
             "W′ (WT factor)",
             "q_eff (overburden)",
-            "γ_eff for Nγ term",
+            "γ·W′ for Nγ term",
             "B (width)", "L (length)",
             "c used", "φ used",
         ],
