@@ -235,7 +235,7 @@ with tab2:
             return ""
 
         st.dataframe(
-            df_c.style.applymap(style_case, subset=["Case"]),
+            df_c.style.map(style_case, subset=["Case"]),
             use_container_width=True, hide_index=True
         )
     else:
