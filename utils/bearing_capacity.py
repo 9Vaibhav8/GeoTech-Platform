@@ -20,7 +20,7 @@ def bearing_capacity_factors(phi_deg: float):
     Nq  = exp(π · tan φ) · tan²(45 + φ/2)
     Nc  = (Nq - 1) · cot φ   for φ > 0°
           5.14                for φ = 0°  (Prandtl limit)
-    Nγ  = 1.5 · (Nq - 1) · tan φ
+    Nγ  = 2 · (Nq + 1) · tan φ
 
     Parameters
     ----------
@@ -36,7 +36,10 @@ def bearing_capacity_factors(phi_deg: float):
 
     Nq = np.exp(np.pi * np.tan(phi_rad)) * np.tan(np.radians(45.0 + phi_deg / 2.0)) ** 2
 
-    if phi_deg == 0.0:
+    if phi_deg < 0.0:
+        raise ValueError(f"Friction angle phi_deg must be non-negative, got {phi_deg}")
+
+    if np.isclose(phi_deg, 0.0):
         Nc = 5.14
     else:
         Nc = (Nq - 1.0) / np.tan(phi_rad)
@@ -50,49 +53,44 @@ def bearing_capacity_factors(phi_deg: float):
 # 2. Shape Factors
 # ---------------------------------------------------------------------------
 
-def shape_factors(B: float, L: float, phi_deg: float):
+def shape_factors(footing_shape: str, B: float, L: float):
     """
     IS 6403:1981 Cl. 5.1 — Shape factors sc, sq, sγ.
 
-    For φ > 10°:
-        Kp = tan²(45 + φ/2)
-        sc  = 1 + 0.2 · Kp · (B/L)
-        sq  = sγ = 1 + 0.1 · Kp · (B/L)
-    For φ ≤ 10°:
-        sc  = 1 + 0.2 · (B/L)
-        sq  = sγ = 1.0
-    Strip footing (B/L → 0):
-        sc = sq = sγ = 1.0
+    Table 2 values:
+      strip:      sc=sq=sγ=1
+      rectangle:  sc=sq=1+0.2(B/L), sγ=1-0.4(B/L)
+      square:     sc=1.3, sq=1.2, sγ=0.8
+      circle:     sc=1.3, sq=1.2, sγ=0.6
 
     Parameters
     ----------
+    footing_shape : str
+        "strip", "square", "rectangular", or "circular".
     B : float
-        Footing width (m).  Pass B = L for square/circular.
+        Footing width or diameter (m).
     L : float
         Footing length (m).  Pass a large value (e.g. 1e6) for strip.
-    phi_deg : float
-        Friction angle (degrees).
 
     Returns
     -------
     (sc, sq, sgamma) : tuple of float
     """
-    if L <= 0 or L > 1e5:  # treat as strip
+    shape = footing_shape.lower()
+    if shape not in {"strip", "square", "rectangular", "circular"}:
+        raise ValueError(f"Unsupported footing shape: {footing_shape}")
+    if B <= 0 or L <= 0:
+        raise ValueError("Footing dimensions B and L must be positive.")
+    if shape == "strip" or L > 1e5:
         return 1.0, 1.0, 1.0
+    if shape == "square":
+        return 1.3, 1.2, 0.8
+    if shape == "circular":
+        return 1.3, 1.2, 0.6
 
-    ratio = B / L  # always ≤ 1 for B ≤ L
-
-    if phi_deg > 10.0:
-        Kp = np.tan(np.radians(45.0 + phi_deg / 2.0)) ** 2
-        sc = 1.0 + 0.2 * Kp * ratio
-        sq = 1.0 + 0.1 * Kp * ratio
-        sgamma = 1.0 + 0.1 * Kp * ratio
-    else:
-        sc = 1.0 + 0.2 * ratio
-        sq = 1.0
-        sgamma = 1.0
-
-    return sc, sq, sgamma
+    # For a rectangle, B is the shorter footing dimension per IS 6403.
+    ratio = min(B, L) / max(B, L)
+    return 1.0 + 0.2 * ratio, 1.0 + 0.2 * ratio, 1.0 - 0.4 * ratio
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +286,9 @@ def net_ultimate_bearing_capacity(
         L = B
     elif footing_shape == "strip":
         L = 1e6  # effectively infinite
+    elif footing_shape == "rectangular" and L < B:
+        # IS 6403 uses B as the shorter dimension for rectangular footings.
+        B, L = L, B
 
     # --- Undrained vs drained parameters ------------------------------------
     if is_undrained:
@@ -341,7 +342,8 @@ def net_ultimate_bearing_capacity(
         "ic": ic, "iq": iq, "igamma": igamma,
         "W_prime": W_prime,
         "q_eff": q_eff,
-        "gamma_ngamma": gamma_ngamma,
+        # Effective coefficient multiplying Nγ after applying W′.
+        "gamma_ngamma": gamma_moist * W_prime,
         "qf": qf,
         "qnu": qnu,
         "c_used": c_used,
