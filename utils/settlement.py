@@ -134,6 +134,8 @@ def schmertmann_settlement(layers, Df, B, L, P_kN, wt_design_bgl, t_years=50):
       C1 = 1 − 0.5 σ′v0/Δp ≥ 0.5,   C2 = 1 + 0.2 log10(t/0.1),
       Iz,peak = 0.5 + 0.1 √(Δp/σ′vp), σ′vp at the depth of the Iz peak (0.5B square … B strip).
     B is taken as the smaller plan dimension. Granular layers only (clay → consolidation).
+    Uses entered layer Es_kPa when provided; otherwise estimates from SPT N (optional correlation)
+    and logs a warning. If neither Es_kPa nor SPT N is available, logs a warning and omits the layer.
     Returns dict: S_mm, C1, C2, delta_p, Iz_peak, sigma_v0, sublayer_data, warnings.
     """
     B, L = min(B, L), max(B, L)
@@ -160,11 +162,25 @@ def schmertmann_settlement(layers, Df, B, L, P_kN, wt_design_bgl, t_years=50):
         if lyr.get("is_clay", False) or symbol not in GRANULAR_SYMBOLS:
             continue                                   # cohesive → consolidation module
 
-        N_corr = lyr.get("N_corrected") or lyr.get("N_field")
-        if not N_corr:
-            N_corr = 10
-            warnings.append(f"Layer {lyr.get('name', symbol)}: no N entered — N = 10 assumed")
-        Es = schmertmann_Es_from_N(N_corr, "gravel" if symbol in ("GW", "GP", "GM", "GC") else "sand")
+        lyr_label = lyr.get("name", symbol)
+        es_entered = lyr.get("Es_kPa")
+        if es_entered is not None and es_entered > 0:
+            Es = float(es_entered)
+            es_source = "Entered"
+        else:
+            N_corr = lyr.get("N_corrected") or lyr.get("N_field")
+            if not N_corr or N_corr <= 0:
+                warnings.append(
+                    f"Layer '{lyr_label}' ({symbol}): missing Es and SPT N — layer omitted from immediate "
+                    f"settlement calculation. Enter Es or SPT N in P1."
+                )
+                continue
+            Es = schmertmann_Es_from_N(N_corr, "gravel" if symbol in ("GW", "GP", "GM", "GC") else "sand")
+            es_source = f"SPT correlation (N={N_corr})"
+            warnings.append(
+                f"Layer '{lyr_label}' ({symbol}): Es not entered — estimated Es = {Es:.0f} kPa "
+                f"from SPT N = {N_corr} (Bowles 1996 correlation)."
+            )
 
         z = seg_top
         while z < seg_bot - 1e-9:
@@ -176,8 +192,9 @@ def schmertmann_settlement(layers, Df, B, L, P_kN, wt_design_bgl, t_years=50):
                 sum_Iz_Es_dz += contrib
                 sublayer_data.append({
                     "z_top_m": round(zt, 3), "z_bot_m": round(zb, 3), "z_mid_m": round((zt + zb) / 2, 3),
-                    "layer_name": lyr.get("name", symbol), "symbol": symbol,
-                    "Es_kPa": round(Es, 1), "Iz": round(Iz, 4), "Iz_over_Es": round(Iz / Es, 8),
+                    "layer_name": lyr_label, "symbol": symbol,
+                    "Es_kPa": round(Es, 1), "Es_source": es_source,
+                    "Iz": round(Iz, 4), "Iz_over_Es": round(Iz / Es, 8),
                     "dz_m": round(dz, 3), "contrib_m": round(contrib, 8),
                 })
             z += dz
