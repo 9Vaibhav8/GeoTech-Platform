@@ -8,7 +8,6 @@ import streamlit as st
 SOIL_SYMBOLS = ["Fill", "SM", "SP", "SW", "SC", "ML", "CL", "CI", "CH", "MH", "GW", "GP", "GM", "GC"]
 
 # Default layer structure — every layer dict follows this schema
-# Default layer structure — every layer dict follows this schema
 DEFAULT_LAYER = {
     "depth_top": 0.0,      # m bgl (below ground level)
     "depth_bot": 1.5,      # m bgl
@@ -20,7 +19,7 @@ DEFAULT_LAYER = {
     "phi_prime": 30.0,     # degrees — drained friction angle φ'
     "cu": 0.0,             # kPa  — undrained shear strength (0 if N/A)
     "is_undrained": False, # True for UU analysis of clay
-    "Es_kPa": None,        # Elastic modulus Es in kPa (None if not entered / use SPT correlation)
+    "Es_kPa": None,        # Elastic modulus Es in kPa (None if not entered; optional SPT estimate used)
     "N_field": None,       # Observed SPT N (None if not tested)
     "N_corrected": None,   # IS 2131 corrected N (filled by P2)
     # Consolidation params (clay layers only; None if not applicable)
