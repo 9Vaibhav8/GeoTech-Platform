@@ -1,6 +1,5 @@
 """
-Home.py — Landing page for the CE 402 Geotechnical Engineering Platform
-IIT Mandi — Hostel Foundation Design
+Home.py — Landing page for the Geotechnical Analysis Platform
 """
 
 import re
@@ -10,7 +9,7 @@ import streamlit as st
 from utils.constants import init_session_state
 
 st.set_page_config(
-    page_title="CE 402 Geotechnical Platform | IIT Mandi",
+    page_title="Geotechnical Analysis Platform",
     page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -222,12 +221,12 @@ st.markdown(
     '<div class="topbar"><div class="wrap">'
     '<a class="brand" href="/" target="_self">'
     '<span class="brand-mark"><i style="background:#6b5238"></i><i style="background:#b99b66"></i><i style="background:#5d7577"></i></span>'
-    '<span class="brand-name">CE 402 Geotechnical Platform<span class="brand-sub">IIT Mandi · Civil Engineering</span></span></a>'
+    '<span class="brand-name">Geotechnical Analysis Platform<span class="brand-sub">Foundation design toolkit</span></span></a>'
     f'<nav class="topnav">{nav_links}</nav>'
     '</div></div>'
     '<div class="hero"><div class="wrap">'
     '<div>'
-    '<h1>Foundation analysis for the IIT Mandi hostel</h1>'
+    '<h1>Foundation analysis, from borehole to settlement</h1>'
     '<p>Take a borehole log through SPT correction, bearing capacity, stress distribution and settlement. '
     'All five modules share one soil profile, so each result feeds the next.</p>'
     '<div class="actions">'
@@ -299,8 +298,8 @@ st.markdown(
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown(
     '<div class="ce"><div class="foot"><div class="wrap">'
-    '<div><b>CE 402 Geotechnical Engineering</b><br>Department of Civil Engineering, IIT Mandi</div>'
-    '<div>Version 1.0.0<br>For academic foundation-design assignments</div>'
+    '<div><b>Geotechnical Analysis Platform</b><br>Soil profiling, bearing capacity and settlement</div>'
+    '<div>Version 1.0.0<br>Academic use only</div>'
     '</div></div></div>',
     unsafe_allow_html=True,
 )
