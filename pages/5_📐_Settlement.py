@@ -27,7 +27,7 @@ from utils.settlement import (
     total_consolidation_settlement,
     time_settlement_curve,
 )
-from utils import is1904 as IS
+from utils import Is1904 as IS
 
 st.set_page_config(page_title="P5 – Settlement", page_icon="📐", layout="wide")
 init_session_state()
