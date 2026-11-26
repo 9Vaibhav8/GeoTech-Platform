@@ -257,6 +257,12 @@ st.markdown(
 )
 
 # ── Modules ───────────────────────────────────────────────────────────────────
+for m in MODULES:
+    st.page_link(
+        m["page"],
+        label=f'{m["id"]} — {m["title"]}'
+    )
+
 cards = []
 for m in MODULES:
     tags = "".join(f'<span class="tag">{t}</span>' for t in m["tags"])
