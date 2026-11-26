@@ -1,7 +1,7 @@
 """
 pages/1_🗺️_Soil_Profile.py
 P1 — Soil Profile Input & Visualization
-Geotechnical Analysis Platform
+CE 402 Geotechnical Engineering Platform — IIT Mandi
 """
 
 import copy
@@ -14,17 +14,15 @@ import pandas as pd
 matplotlib.use("Agg")
 
 from utils.constants import init_session_state, SOIL_SYMBOLS, DEFAULT_LAYER
-from utils.theme import apply_theme, top_nav, page_header
 
-st.set_page_config(page_title="P1 — Soil Profile", page_icon="🗺️", layout="wide")
+st.set_page_config(page_title="P1 — Soil Profile", layout="wide")
 
-# ── Session state + theme ────────────────────────────────────────────────────
+# ── Session state ────────────────────────────────────────────────────────────
 init_session_state()
-apply_theme()
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Site information")
+    st.header("🏗️ Site Information")
 
     st.session_state.borehole_name = st.text_input(
         "Borehole name",
@@ -55,27 +53,11 @@ with st.sidebar:
         key="sidebar_wt_design",
         help="Use highest seasonal WT for bearing capacity",
     )
-    st.caption("Use the highest seasonal WT for bearing capacity design.")
+    st.caption("ℹ️ Use highest seasonal WT for bearing capacity design.")
 
-# ── Header, navigation and key figures ───────────────────────────────────────
-top_nav("P1")
-page_header(
-    "P1",
-    "Soil Profile",
-    "Describe each layer of the borehole. Every other module reads this profile, "
-    "so changes here carry through the whole analysis.",
-)
-
-_layers_now = st.session_state.layers
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Borehole", st.session_state.borehole_name or "—")
-m2.metric("Ground RL", f"{st.session_state.ground_rl:.2f} m")
-m3.metric("Layers", len(_layers_now))
-m4.metric(
-    "Profile depth",
-    f"{max(l['depth_bot'] for l in _layers_now):.1f} m" if _layers_now else "—",
-)
-st.write("")
+# ── Page title ───────────────────────────────────────────────────────────────
+st.title("🗺️ P1 — Soil Profile")
+st.caption(f"Borehole: **{st.session_state.borehole_name}** | Ground RL: **{st.session_state.ground_rl:.2f} m**")
 
 # ── Helper: sort layers ───────────────────────────────────────────────────────
 def sort_layers():
@@ -88,9 +70,9 @@ col_editor, col_viz = st.columns([1.1, 0.9], gap="large")
 # LEFT COLUMN — Layer Editor
 # ═══════════════════════════════════════════════════════════════════════════════
 with col_editor:
-    st.subheader("Layer editor")
+    st.subheader("📋 Layer Editor")
 
-    if st.button("Add layer", key="btn_add_layer", icon=":material/add:"):
+    if st.button("➕ Add Layer", key="btn_add_layer"):
         last = st.session_state.layers[-1] if st.session_state.layers else DEFAULT_LAYER
         new = copy.deepcopy(DEFAULT_LAYER)
         new["depth_top"] = last["depth_bot"]
@@ -314,16 +296,16 @@ with col_editor:
                         is_gravel = layer["symbol"] in ("GW", "GP", "GM", "GC")
                         est_kpa = (1200.0 * (n_preview + 6)) if is_gravel else (500.0 * (n_preview + 15))
                         st.caption(
-                            f"Optional SPT correlation will be used in P5: "
+                            f"ℹ️ Optional SPT correlation will be used in P5: "
                             f"**Es ≈ {est_kpa / 1000.0:.2f} MPa** ({est_kpa:.0f} kPa) from N = {n_preview}."
                         )
                     else:
                         st.warning(
-                            "Neither Es nor SPT N is entered for this layer. "
+                            "⚠️ Neither Es nor SPT N is entered for this layer. "
                             "P5 immediate settlement will skip this layer unless Es or SPT N is provided."
                         )
 
-            if st.button(f"Delete layer {i + 1}", key=f"layer_{i}_delete", icon=":material/delete:"):
+            if st.button(f"🗑️ Delete layer {i + 1}", key=f"layer_{i}_delete"):
                 to_delete = i
 
     # Perform deletion outside the loop
@@ -338,7 +320,7 @@ with col_editor:
 # RIGHT COLUMN — Profile Visualization
 # ═══════════════════════════════════════════════════════════════════════════════
 with col_viz:
-    st.subheader("Profile section")
+    st.subheader("📊 Soil Profile Visualization")
 
     layers = st.session_state.layers
     wt_meas = st.session_state.wt_measured_bgl
@@ -347,39 +329,50 @@ with col_viz:
 
     # Hatching patterns by symbol
     HATCH_MAP = {
-        "SM": "///", "SP": "...", "SW": "xxx", "SC": "\\\\",
-        "ML": "---", "CL": "---", "CI": "---", "CH": "---", "MH": "===",
-        "GW": "++", "GP": "ooo", "GM": "///", "GC": "xxx", "Fill": "***",
+        "SM": "///",
+        "SP": "...",
+        "SW": "xxx",
+        "SC": "\\\\",
+        "ML": "---",
+        "CL": "---",
+        "CI": "---",
+        "CH": "---",
+        "MH": "===",
+        "GW": "++",
+        "GP": "ooo",
+        "GM": "///",
+        "GC": "xxx",
+        "Fill": "***",
     }
     # Colour map (light fills)
     COLOR_MAP = {
-        "SM": "#d4c5a0", "SP": "#f0e68c", "SW": "#daa520", "SC": "#b8860b",
-        "ML": "#90ee90", "CL": "#a2c4c9", "CI": "#7fb3d3", "CH": "#5b8db8",
-        "MH": "#c5e0b4", "GW": "#c7b89d", "GP": "#e0cda9", "GM": "#b5a07a",
-        "GC": "#9b7653", "Fill": "#d3d3d3",
+        "SM": "#d4c5a0",
+        "SP": "#f0e68c",
+        "SW": "#daa520",
+        "SC": "#b8860b",
+        "ML": "#90ee90",
+        "CL": "#a2c4c9",
+        "CI": "#7fb3d3",
+        "CH": "#5b8db8",
+        "MH": "#c5e0b4",
+        "GW": "#c7b89d",
+        "GP": "#e0cda9",
+        "GM": "#b5a07a",
+        "GC": "#9b7653",
+        "Fill": "#d3d3d3",
     }
-    INK = "#0d1b2a"
-    WATER = "#1f7ab8"
-    FOOTING = "#c0392b"
 
     if layers:
         max_depth = max(l["depth_bot"] for l in layers)
-        plt.rcParams["hatch.linewidth"] = 0.6
         fig, ax = plt.subplots(figsize=(4.5, max(6, max_depth * 0.6)))
-        fig.patch.set_facecolor("white")
-        ax.set_facecolor("white")
         ax.set_xlim(0, 1)
         ax.set_ylim(max_depth + 0.5, -0.3)  # inverted y-axis (depth increases down)
         ax.set_yticks([l["depth_top"] for l in layers] + [layers[-1]["depth_bot"]])
-        ax.set_ylabel("Depth (m bgl)", fontsize=10, color=INK)
+        ax.set_ylabel("Depth (m bgl)", fontsize=10)
         ax.set_xticks([])
-        ax.tick_params(axis="y", labelsize=8, colors="#5a6b7b", length=3)
-        for side in ("top", "right", "bottom"):
-            ax.spines[side].set_visible(False)
-        ax.spines["left"].set_color("#c9d1da")
         ax.set_title(
-            f"Borehole {st.session_state.borehole_name}  ·  Ground RL {st.session_state.ground_rl:.2f} m",
-            fontsize=9, color=INK, loc="left",
+            f"Borehole: {st.session_state.borehole_name}\nGround RL = {st.session_state.ground_rl:.2f} m",
+            fontsize=9,
         )
 
         for layer in layers:
@@ -395,7 +388,7 @@ with col_viz:
                 d_bot - d_top,
                 boxstyle="square,pad=0",
                 facecolor=color,
-                edgecolor=INK,
+                edgecolor="black",
                 linewidth=0.8,
                 hatch=hatch,
             )
@@ -406,40 +399,38 @@ with col_viz:
                 0.50, mid,
                 f"{sym}\n{d_top:.1f}–{d_bot:.1f} m",
                 ha="center", va="center", fontsize=7.5,
-                fontweight="bold", color=INK,
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="none", alpha=0.8),
+                fontweight="bold", color="#1a1a1a",
             )
 
         # Ground-water table lines
         if 0 <= wt_meas <= max_depth:
-            ax.axhline(wt_meas, color=WATER, linewidth=1.6, linestyle="-", label=f"WT measured = {wt_meas:.1f} m")
-            ax.text(0.97, wt_meas - 0.1, f"WT ({wt_meas:.1f} m)", ha="right", va="bottom",
-                    color=WATER, fontsize=7)
+            ax.axhline(wt_meas, color="blue", linewidth=1.5, linestyle="-", label=f"WT meas = {wt_meas:.1f} m")
+            ax.text(0.97, wt_meas - 0.1, f"WT\n({wt_meas:.1f} m)", ha="right", va="bottom",
+                    color="blue", fontsize=7)
         if 0 <= wt_des <= max_depth:
-            ax.axhline(wt_des, color=WATER, linewidth=1.6, linestyle="--", label=f"WT design = {wt_des:.1f} m")
-            ax.text(0.03, wt_des - 0.1, f"WT design ({wt_des:.1f} m)", ha="left", va="bottom",
-                    color=WATER, fontsize=7)
+            ax.axhline(wt_des, color="blue", linewidth=1.5, linestyle="--", label=f"WT design = {wt_des:.1f} m")
+            ax.text(0.03, wt_des - 0.1, f"WT_d\n({wt_des:.1f} m)", ha="left", va="bottom",
+                    color="blue", fontsize=7)
 
         # Foundation depth Df
         if 0 <= DF <= max_depth:
-            ax.axhline(DF, color=FOOTING, linewidth=1.5, linestyle="--", label=f"Df = {DF} m")
+            ax.axhline(DF, color="red", linewidth=1.5, linestyle="--", label=f"Df = {DF} m")
             ax.text(0.97, DF + 0.1, f"Df = {DF} m", ha="right", va="top",
-                    color=FOOTING, fontsize=7, fontweight="bold")
+                    color="red", fontsize=7, fontweight="bold")
 
-        ax.legend(loc="lower right", fontsize=7, framealpha=0.95, edgecolor="#e0e5eb")
-        ax.grid(axis="y", linestyle=":", linewidth=0.4, color="#aab4bf")
+        ax.legend(loc="lower right", fontsize=7, framealpha=0.8)
+        ax.grid(axis="y", linestyle=":", linewidth=0.4, color="#aaaaaa")
         fig.tight_layout()
-        with st.container(border=True):
-            st.pyplot(fig)
+        st.pyplot(fig)
         plt.close(fig)
     else:
-        st.info("No layers defined. Add a layer in the editor to see the section.")
+        st.info("No layers defined. Add layers in the editor on the left.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SUMMARY TABLE
 # ═══════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.subheader("Layer summary")
+st.subheader("📄 Layer Summary")
 
 if st.session_state.layers:
     rows = []
