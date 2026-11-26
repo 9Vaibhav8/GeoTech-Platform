@@ -5,8 +5,8 @@
 An interactive web platform for shallow foundation analysis and design of a **G+3 students' hostel** in Mandi, Himachal Pradesh (Seismic Zone V). Built in Python and Streamlit with modular, code-traceable geotechnical solvers in SI units (`kN`, `kPa`, `m`, `mm`).
 
 > **Live Deployment (Streamlit Community Cloud):**  
-> [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://your-app-name.streamlit.app/)  
-> *(Placeholder — replace `https://your-app-name.streamlit.app/` with your deployed Streamlit Community Cloud URL.)*
+https://geotech-platformgit-5hgqwskkbpyo8z2zykgfiq.streamlit.app/ 
+
 
 ---
 
