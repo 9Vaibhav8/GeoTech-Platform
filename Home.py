@@ -62,6 +62,14 @@ MODULES = [
     },
 ]
 
+for i, m in enumerate(MODULES, start=1):
+    matches = list(Path("pages").glob(f"{i}_*.py"))
+
+    if len(matches) == 1:
+        m["page"] = matches[0].as_posix()
+    else:
+        st.error(f"Cannot uniquely locate module P{i}")
+
 
 def page_url(path: str) -> str:
     """Streamlit URL slug for a file in /pages (number prefix is dropped)."""
