@@ -7,6 +7,8 @@ All computations in SI units (kN, kPa, m).
 import numpy as np
 
 GAMMA_W = 9.81  # kN/m³, unit weight of water
+STRIP_LENGTH_EQUIV = 1e6  # m, effectively infinite length for strip footings
+DEPTH_EPS = 1e-9  # m, floating-point tolerance for depth boundaries
 
 
 # ---------------------------------------------------------------------------
@@ -32,12 +34,11 @@ def bearing_capacity_factors(phi_deg: float):
     (Nc, Nq, Ngamma) : tuple of float
         Dimensionless bearing capacity factors per IS 6403:1981 Table 1.
     """
-    phi_rad = np.radians(phi_deg)
-
-    Nq = np.exp(np.pi * np.tan(phi_rad)) * np.tan(np.radians(45.0 + phi_deg / 2.0)) ** 2
-
     if phi_deg < 0.0:
         raise ValueError(f"Friction angle phi_deg must be non-negative, got {phi_deg}")
+
+    phi_rad = np.radians(phi_deg)
+    Nq = np.exp(np.pi * np.tan(phi_rad)) * np.tan(np.radians(45.0 + phi_deg / 2.0)) ** 2
 
     if np.isclose(phi_deg, 0.0):
         Nc = 5.14
@@ -70,7 +71,7 @@ def shape_factors(footing_shape: str, B: float, L: float):
     B : float
         Footing width or diameter (m).
     L : float
-        Footing length (m).  Pass a large value (e.g. 1e6) for strip.
+        Footing length (m). Pass a large value (e.g. STRIP_LENGTH_EQUIV) for strip.
 
     Returns
     -------
@@ -81,7 +82,7 @@ def shape_factors(footing_shape: str, B: float, L: float):
         raise ValueError(f"Unsupported footing shape: {footing_shape}")
     if B <= 0 or L <= 0:
         raise ValueError("Footing dimensions B and L must be positive.")
-    if shape == "strip" or L > 1e5:
+    if shape == "strip" or L >= STRIP_LENGTH_EQUIV:
         return 1.0, 1.0, 1.0
     if shape == "square":
         return 1.3, 1.2, 0.8
@@ -173,7 +174,8 @@ def water_table_factor(Df: float, B: float, wt_bgl: float):
     W_prime : float
         Correction factor (0.5 ≤ W′ ≤ 1.0).
     """
-    if B <= 0: raise ValueError("Footing width B must be positive.")
+    if B <= 0:
+        raise ValueError("Footing width B must be positive.")
     if wt_bgl <= Df:
         return 0.5
     elif wt_bgl >= Df + B:
@@ -182,8 +184,9 @@ def water_table_factor(Df: float, B: float, wt_bgl: float):
         return 0.5 + 0.5 * (wt_bgl - Df) / B
 
 
+# ---------------------------------------------------------------------------
 # 6. Local Shear Parameters
-
+# ---------------------------------------------------------------------------
 
 def local_shear_params(c_prime: float, phi_prime_deg: float):
     """
@@ -209,9 +212,141 @@ def local_shear_params(c_prime: float, phi_prime_deg: float):
     return c_local, phi_local_deg
 
 
+# ---------------------------------------------------------------------------
+# 6b. Stratified Effective Overburden Pressure
+# ---------------------------------------------------------------------------
 
+def effective_overburden_pressure(
+    layers: list[dict] | None,
+    Df: float,
+    wt_bgl: float,
+    gamma_w: float = GAMMA_W,
+    fallback_gamma_moist: float | None = None,
+    fallback_gamma_sat: float | None = None,
+) -> tuple[float, list[str]]:
+    """
+    Integrate effective vertical overburden stress q_eff from ground level (0 m)
+    to founding depth Df (m), splitting layers at the design water table wt_bgl.
+
+    Parameters
+    ----------
+    layers : list of dict or None
+        Soil layer dicts containing 'depth_top', 'depth_bot', 'gamma_moist',
+        'gamma_sat', and optionally 'symbol' / 'name'.
+    Df : float
+        Founding depth below ground level (m).
+    wt_bgl : float
+        Design water table depth below ground level (m).
+    gamma_w : float
+        Unit weight of water (kN/m³), defaults to GAMMA_W.
+    fallback_gamma_moist : float or None
+        Used only if layers is empty/None or a layer omits 'gamma_moist'.
+    fallback_gamma_sat : float or None
+        Used only if layers is empty/None or a layer omits 'gamma_sat'.
+
+    Returns
+    -------
+    (q_eff, breakdown) : tuple[float, list[str]]
+        Effective surcharge q_eff (kPa) and step-by-step calculation breakdown.
+    """
+    if Df < 0.0:
+        raise ValueError(f"Founding depth Df must be non-negative, got {Df}")
+    if np.isclose(Df, 0.0):
+        return 0.0, ["Df = 0.00 m → q = 0.00 kPa"]
+
+    wt_eff = max(0.0, float(wt_bgl))
+
+    if not layers:
+        if fallback_gamma_moist is None or fallback_gamma_sat is None:
+            raise ValueError(
+                "No soil layers provided and fallback unit weights were not specified."
+            )
+        if wt_eff >= Df:
+            q_eff = fallback_gamma_moist * Df
+            return q_eff, [
+                f"0.00–{Df:.2f} m (moist): {fallback_gamma_moist:.2f} × {Df:.2f} = {q_eff:.2f} kPa"
+            ]
+        q_above = fallback_gamma_moist * wt_eff
+        q_below = (fallback_gamma_sat - gamma_w) * (Df - wt_eff)
+        steps = []
+        if wt_eff > DEPTH_EPS:
+            steps.append(
+                f"0.00–{wt_eff:.2f} m (moist): {fallback_gamma_moist:.2f} × {wt_eff:.2f} = {q_above:.2f} kPa"
+            )
+        steps.append(
+            f"{wt_eff:.2f}–{Df:.2f} m (sub): ({fallback_gamma_sat:.2f} − {gamma_w:.2f}) × {Df - wt_eff:.2f} = {q_below:.2f} kPa"
+        )
+        return q_above + q_below, steps
+
+    sorted_layers = sorted(layers, key=lambda lyr: float(lyr["depth_top"]))
+    q_eff = 0.0
+    breakdown: list[str] = []
+    cursor = 0.0
+
+    for idx, lyr in enumerate(sorted_layers):
+        if cursor >= Df - DEPTH_EPS:
+            break
+
+        lyr_top = float(lyr["depth_top"])
+        lyr_bot = float(lyr["depth_bot"])
+
+        # Extend final layer down to Df if Df lies below the bottom of the defined profile
+        if idx == len(sorted_layers) - 1 and lyr_bot < Df:
+            lyr_bot = Df
+
+        seg_top = max(cursor, lyr_top)
+        seg_bot = min(lyr_bot, Df)
+        if seg_bot <= seg_top + DEPTH_EPS:
+            continue
+
+        raw_moist = lyr.get("gamma_moist", fallback_gamma_moist)
+        raw_sat = lyr.get("gamma_sat", fallback_gamma_sat)
+        if raw_moist is None or raw_sat is None:
+            raise ValueError(f"Layer {idx + 1} is missing 'gamma_moist' or 'gamma_sat'.")
+
+        g_moist = float(raw_moist)
+        g_sat = float(raw_sat)
+        label = lyr.get("symbol") or lyr.get("name") or f"Layer {idx + 1}"
+
+        if wt_eff <= seg_top + DEPTH_EPS:
+            dz = seg_bot - seg_top
+            dq = (g_sat - gamma_w) * dz
+            q_eff += dq
+            breakdown.append(
+                f"{seg_top:.2f}–{seg_bot:.2f} m [{label}, sub]: "
+                f"({g_sat:.2f} − {gamma_w:.2f}) × {dz:.2f} = {dq:.2f} kPa"
+            )
+        elif wt_eff >= seg_bot - DEPTH_EPS:
+            dz = seg_bot - seg_top
+            dq = g_moist * dz
+            q_eff += dq
+            breakdown.append(
+                f"{seg_top:.2f}–{seg_bot:.2f} m [{label}, moist]: "
+                f"{g_moist:.2f} × {dz:.2f} = {dq:.2f} kPa"
+            )
+        else:
+            dz_above = wt_eff - seg_top
+            dq_above = g_moist * dz_above
+            dz_below = seg_bot - wt_eff
+            dq_below = (g_sat - gamma_w) * dz_below
+            q_eff += dq_above + dq_below
+            breakdown.append(
+                f"{seg_top:.2f}–{wt_eff:.2f} m [{label}, moist]: "
+                f"{g_moist:.2f} × {dz_above:.2f} = {dq_above:.2f} kPa"
+            )
+            breakdown.append(
+                f"{wt_eff:.2f}–{seg_bot:.2f} m [{label}, sub]: "
+                f"({g_sat:.2f} − {gamma_w:.2f}) × {dz_below:.2f} = {dq_below:.2f} kPa"
+            )
+
+        cursor = seg_bot
+
+    return q_eff, breakdown
+
+
+# ---------------------------------------------------------------------------
 # 7. Net Ultimate Bearing Capacity
-
+# ---------------------------------------------------------------------------
 
 def net_ultimate_bearing_capacity(
     c_prime: float,
@@ -227,6 +362,8 @@ def net_ultimate_bearing_capacity(
     alpha_deg: float = 0.0,          # inclination of load from vertical (degrees)
     is_undrained: bool = False,       # True → φ=0 cu analysis
     cu: float = 0.0,
+    layers: list[dict] | None = None,
+    q_eff_override: float | None = None,
 ):
     """
     IS 6403:1981 Cl. 5.1 — Net ultimate bearing capacity qnu (kPa).
@@ -241,51 +378,21 @@ def net_ultimate_bearing_capacity(
         qnu = cu · Nc · sc · dc           (net)
 
     Effective overburden at founding level:
-        q = γ_moist · Df                              if wt_bgl ≥ Df
-        q = γ_moist · wt_bgl + (γ_sat − γw)·(Df − wt_bgl)   if wt_bgl < Df
+        Integrated across `layers` from 0 to Df (splitting at wt_bgl) when
+        `layers` is provided; otherwise computed from homogeneous `gamma_moist`
+        and `gamma_sat`. Can also be supplied directly via `q_eff_override`.
 
     Net ultimate bearing capacity:
         qnu = qf − q  (gross ultimate minus overburden)
         For undrained case: qnu = cu · Nc · sc · dc
 
     Local shear: parameters reduced per IS 6403:1981 Cl. 5.3 before computation.
-
-    Parameters
-    ----------
-    c_prime : float
-        Drained cohesion c′ (kPa).  Ignored when is_undrained=True.
-    phi_prime_deg : float
-        Drained friction angle φ′ (degrees).  Ignored when is_undrained=True.
-    gamma_moist : float
-        Moist unit weight above WT (kN/m³).
-    gamma_sat : float
-        Saturated unit weight (kN/m³).
-    Df : float
-        Founding depth below GL (m).
-    B : float
-        Footing width (m).
-    L : float
-        Footing length (m).  Set equal to B for square/circular; large (1e6) for strip.
-    wt_bgl : float
-        Water table depth below GL (m).
-    footing_shape : str
-        One of "strip", "square", "rectangular", "circular".
-    failure_mode : str
-        "general" or "local".
-    alpha_deg : float
-        Load inclination from vertical (degrees).
-    is_undrained : bool
-        If True, perform undrained (φ=0, cu) analysis.
-    cu : float
-        Undrained shear strength (kPa).  Used only when is_undrained=True.
-
-
     """
     # --- Adjust L for square/circular/strip ---------------------------------
     if footing_shape in ("square", "circular"):
         L = B
     elif footing_shape == "strip":
-        L = 1e6  # effectively infinite
+        L = STRIP_LENGTH_EQUIV
     elif footing_shape == "rectangular" and L < B:
         # IS 6403 uses B as the shorter dimension for rectangular footings.
         B, L = L, B
@@ -305,12 +412,18 @@ def net_ultimate_bearing_capacity(
     # --- Bearing capacity factors -------------------------------------------
     Nc, Nq, Ngamma = bearing_capacity_factors(phi_used)
 
-   # --- Effective overburden at founding level (IS 6403 Cl. 5.1.2) ---------
+    # --- Effective overburden at founding level (IS 6403 Cl. 5.1.2) ---------
     wt_eff = max(0.0, wt_bgl)
-    if wt_eff >= Df:
-        q_eff = gamma_moist * Df
+    if q_eff_override is not None:
+        q_eff = float(q_eff_override)
     else:
-        q_eff = gamma_moist * wt_eff + (gamma_sat - GAMMA_W) * (Df - wt_eff)
+        q_eff, _ = effective_overburden_pressure(
+            layers=layers,
+            Df=Df,
+            wt_bgl=wt_eff,
+            fallback_gamma_moist=gamma_moist,
+            fallback_gamma_sat=gamma_sat,
+        )
 
     # --- Water table correction factor W' (IS 6403 Cl. 5.1.2.3) -------------
     W_prime = water_table_factor(Df, B, wt_eff)
@@ -355,9 +468,9 @@ def net_ultimate_bearing_capacity(
     }
 
 
-
+# ---------------------------------------------------------------------------
 # 8. Net Safe Bearing Capacity
-
+# ---------------------------------------------------------------------------
 
 def net_safe_bearing_capacity(qnu: float, FOS: float = 3.0):
     """
@@ -380,8 +493,9 @@ def net_safe_bearing_capacity(qnu: float, FOS: float = 3.0):
     return qnu / FOS
 
 
+# ---------------------------------------------------------------------------
 # 9. Effective Area (Eccentric Loading)
-
+# ---------------------------------------------------------------------------
 
 def effective_area(B: float, L: float, ex: float, ey: float):
     """
@@ -410,7 +524,10 @@ def effective_area(B: float, L: float, ex: float, ey: float):
     return B_eff, L_eff, A_eff
 
 
-# 10 Footing Size
+# ---------------------------------------------------------------------------
+# 10. Footing Size
+# ---------------------------------------------------------------------------
+
 def required_footing_size(
     P_kN: float,
     c_prime: float,
@@ -428,6 +545,9 @@ def required_footing_size(
     cu: float = 0.0,
     max_iter: int = 50,
     tol: float = 1e-4,
+    layers: list[dict] | None = None,
+    q_eff_override: float | None = None,
+    width_step: float = 0.05,
 ):
     """Iterative solution for required footing width B (and length L) per IS 6403:1981.
     Note: For 'strip' footings, P_kN is interpreted as load per unit length (kN/m).
@@ -461,9 +581,20 @@ def required_footing_size(
             return b
         elif shape == "rectangular":
             return aspect_ratio * b
-        return 1e6  # strip
+        return STRIP_LENGTH_EQUIV
 
-    B = max(1.0, _width_from_qns(150.0))
+    # Compute initial qnu at B = 1.0 m so the initial trial width scales dynamically
+    B_init = 1.0
+    res_init = net_ultimate_bearing_capacity(
+        c_prime=c_prime, phi_prime_deg=phi_prime_deg,
+        gamma_moist=gamma_moist, gamma_sat=gamma_sat,
+        Df=Df, B=B_init, L=_length_from_B(B_init), wt_bgl=wt_bgl,
+        footing_shape=shape, failure_mode=failure_mode,
+        alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu,
+        layers=layers, q_eff_override=q_eff_override,
+    )
+    qns_init = max(res_init["qnu"] / FOS, tol)
+    B = max(B_init, _width_from_qns(qns_init))
 
     for _ in range(max_iter):
         L_iter = _length_from_B(B)
@@ -473,6 +604,7 @@ def required_footing_size(
             Df=Df, B=B, L=L_iter, wt_bgl=wt_bgl,
             footing_shape=shape, failure_mode=failure_mode,
             alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu,
+            layers=layers, q_eff_override=q_eff_override,
         )
         qnu = res["qnu"]
         if qnu <= 0:
@@ -485,8 +617,8 @@ def required_footing_size(
             break
         B = B_new
 
-    # Round up to nearest 0.05 m
-    B_rounded = float(np.ceil(B / 0.05) * 0.05)
+    # Round up to nearest width increment
+    B_rounded = float(np.ceil(B / width_step) * width_step)
     L_final = _length_from_B(B_rounded)
 
     res_final = net_ultimate_bearing_capacity(
@@ -495,6 +627,7 @@ def required_footing_size(
         Df=Df, B=B_rounded, L=L_final, wt_bgl=wt_bgl,
         footing_shape=shape, failure_mode=failure_mode,
         alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu,
+        layers=layers, q_eff_override=q_eff_override,
     )
     qnu_final = res_final["qnu"]
     qns_final = qnu_final / FOS
