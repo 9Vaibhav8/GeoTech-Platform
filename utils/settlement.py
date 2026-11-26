@@ -43,12 +43,15 @@ from utils.models import (
     FootingGeometry,
     FoundationLoad,
     GAMMA_W,
+    ProfileValidationReport,
     SECONDS_PER_YEAR,
     SchmertmannResult,
     SchmertmannSublayerResult,
     SoilLayer,
     SoilProfile,
+    SoilProfileValidationError,
     TimeSettlementResult,
+    validate_soil_layers,
 )
 from utils.stress_increase import BoussinesqCentreModel, StressDistributionModel
 
@@ -232,6 +235,14 @@ class SchmertmannSettlementCalculator:
         wt_design_bgl: float | None = None,
         t_years: float = 50.0,
     ) -> SchmertmannResult:
+        _, z1_peak, z2_max = self.influence.influence_bounds(footing)
+        # Validate continuous strata from 0.0 m through founding depth and 2B/4B influence depth
+        profile.validate(
+            required_start_m=0.0,
+            founding_depth_m=footing.Df,
+            required_end_m=footing.Df + z2_max,
+        ).raise_if_invalid()
+
         delta_p = compute_net_foundation_pressure(
             profile, footing, load, wt_design_bgl=wt_design_bgl
         )
@@ -244,7 +255,6 @@ class SchmertmannSettlementCalculator:
         # Creep time correction factor C2 — Schmertmann et al. (1978) Eq. 3; Das (2016) Eq. 5.52
         C2 = 1.0 + 0.2 * math.log10(max(float(t_years), 0.1) / 0.1)
 
-        _, z1_peak, z2_max = self.influence.influence_bounds(footing)
         # Effective vertical stress at peak influence depth (Df + z1) — Das (2016) Eq. 5.53
         sigma_vp = profile.effective_vertical_stress(
             footing.Df + z1_peak, wt_bgl=wt_design_bgl
@@ -381,6 +391,7 @@ class ConsolidationSettlementCalculator:
         load: FoundationLoad,
         wt_design_bgl: float | None = None,
         sublayer_thickness: float | None = None,
+        required_depth_m: float | None = None,
     ) -> ConsolidationResult:
         dz_limit = (
             float(sublayer_thickness)
@@ -391,6 +402,22 @@ class ConsolidationSettlementCalculator:
             raise ValueError(
                 f"sublayer_thickness ({dz_limit} m) must satisfy 0 < dz <= 0.5 m per spec."
             )
+
+        max_clay_bot = max(
+            (lyr.depth_bot for lyr in profile.layers if lyr.is_clay),
+            default=footing.Df,
+        )
+        req_end = (
+            float(required_depth_m)
+            if required_depth_m is not None
+            else max(footing.Df, max_clay_bot)
+        )
+        # Validate continuous strata from 0.0 m through Df and required clay analysis depth
+        profile.validate(
+            required_start_m=0.0,
+            founding_depth_m=footing.Df,
+            required_end_m=req_end,
+        ).raise_if_invalid()
 
         delta_p = compute_net_foundation_pressure(
             profile, footing, load, wt_design_bgl=wt_design_bgl
@@ -598,9 +625,11 @@ def schmertmann_settlement(
 ) -> dict[str, Any]:
     """
     Schmertmann et al. (1978) immediate settlement for granular layers.
+    Validates continuous profile through Df + influence zone depth (2B or 4B).
 
     Cite: Schmertmann et al. (1978) Eq. 1–4; IS 8009:1976 Part 1
     """
+    validate_soil_layers(layers, required_start_m=0.0, founding_depth_m=Df).raise_if_invalid()
     profile = SoilProfile.from_dicts(layers, wt_design_bgl=wt_design_bgl)
     shape = "strip" if L / B >= 10.0 else ("square" if abs(L - B) < 1e-9 else "rectangular")
     footing = FootingGeometry(B=float(B), L=float(L), Df=float(Df), shape=shape)
@@ -637,12 +666,20 @@ def total_consolidation_settlement(
     P_kN: float,
     wt_design_bgl: float,
     sublayer_thickness: float = 0.5,
+    required_depth_m: float | None = None,
 ) -> dict[str, Any]:
     """
     Total 1D consolidation settlement across clay sublayers (<= 0.5 m thick).
+    Validates continuous profile through Df and required clay analysis depth.
 
     Cite: IS 8009:1976 Part 1 Cl. 5; Terzaghi (1943)
     """
+    validate_soil_layers(
+        layers,
+        required_start_m=0.0,
+        founding_depth_m=Df,
+        required_end_m=required_depth_m,
+    ).raise_if_invalid()
     profile = SoilProfile.from_dicts(layers, wt_design_bgl=wt_design_bgl)
     shape = "strip" if L / B >= 10.0 else ("square" if abs(L - B) < 1e-9 else "rectangular")
     footing = FootingGeometry(B=float(B), L=float(L), Df=float(Df), shape=shape)
@@ -653,6 +690,7 @@ def total_consolidation_settlement(
         load,
         wt_design_bgl=wt_design_bgl,
         sublayer_thickness=sublayer_thickness,
+        required_depth_m=required_depth_m,
     ).to_dict()
 
 

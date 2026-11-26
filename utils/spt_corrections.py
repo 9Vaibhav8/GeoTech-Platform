@@ -36,8 +36,11 @@ import numpy as np
 from utils.models import (
     DILATANCY_ELIGIBLE_SYMBOLS,
     MohrCoulombFitResult,
+    ProfileValidationReport,
     SPTCorrectionStep,
     SoilProfile,
+    SoilProfileValidationError,
+    validate_soil_layers,
 )
 
 
@@ -210,6 +213,7 @@ class SPTCorrector:
         Compute intermediate and final corrected SPT values for every tested layer.
         Does NOT mutate the input SoilProfile (pure-domain function).
         """
+        profile.validate(required_start_m=0.0).raise_if_invalid()
         wt = (
             float(wt_design_bgl)
             if wt_design_bgl is not None
@@ -309,15 +313,28 @@ _DEFAULT_CORRECTOR = SPTCorrector()
 _DEFAULT_MC_FITTER = MohrCoulombLeastSquaresFitter()
 
 
+def validate_spt_profile(
+    layers: Sequence[Mapping[str, Any]], required_depth_m: float | None = None
+) -> ProfileValidationReport:
+    """Validate layer thickness, continuity, and coverage for SPT overburden stress."""
+    return validate_soil_layers(
+        layers, required_start_m=0.0, required_end_m=required_depth_m
+    )
+
+
 def effective_stress(
     layers: Sequence[Mapping[str, Any]], depth_m: float, wt_bgl: float
 ) -> float:
     """
     Compute effective vertical stress σ′v (kPa) at depth_m (m bgl).
-    Uses exact piecewise integration across strata and water table.
+    Validates continuous profile without gaps/overlaps and coverage through depth_m.
 
     Cite: Terzaghi (1936); Das (2016) Eq. 2.10; IS 2131:1981 Annex B
     """
+    req_end = depth_m if depth_m > 0.0 else None
+    validate_soil_layers(
+        layers, required_start_m=0.0, required_end_m=req_end
+    ).raise_if_invalid()
     profile = SoilProfile.from_dicts(layers, wt_design_bgl=wt_bgl)
     return profile.effective_vertical_stress(depth_m, wt_bgl=wt_bgl)
 
@@ -343,9 +360,11 @@ def correct_spt(
 ) -> list[dict[str, Any]]:
     """
     Apply full IS 2131:1981 correction chain to session-state layer dicts.
+    Validates continuous non-overlapping strata before calculating σ′v.
     Updates `layer["N_corrected"]` in place for downstream P5 settlement usage
     and returns step-by-step trace dictionaries for P2 display.
     """
+    validate_soil_layers(layers, required_start_m=0.0).raise_if_invalid()
     profile = SoilProfile.from_dicts(layers, wt_design_bgl=wt_design_bgl)
     steps = _DEFAULT_CORRECTOR.correct_profile(profile, wt_design_bgl=wt_design_bgl)
 

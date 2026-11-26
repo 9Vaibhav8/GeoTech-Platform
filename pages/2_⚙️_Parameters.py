@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 matplotlib.use("Agg")
 
 from utils.constants import init_session_state, SOIL_SYMBOLS
+from utils.models import SoilProfileValidationError
 from utils.spt_corrections import correct_spt, fit_mohr_coulomb
 
 st.set_page_config(page_title="P2 — Parameters", layout="wide")
@@ -44,17 +45,22 @@ layers_with_spt = [
 if not layers_with_spt:
     st.warning("No layers with SPT N_field values. Add observed SPT N values in P1 — Soil Profile.")
 else:
-    if st.button("🔄 Compute / Refresh SPT Corrections", key="btn_compute_spt"):
-        results = correct_spt(st.session_state.layers, st.session_state.wt_design_bgl)
-        st.session_state["spt_results"] = results
+    try:
+        if st.button("🔄 Compute / Refresh SPT Corrections", key="btn_compute_spt"):
+            results = correct_spt(st.session_state.layers, st.session_state.wt_design_bgl)
+            st.session_state["spt_results"] = results
 
-    # Auto-compute on first visit
-    if "spt_results" not in st.session_state:
+        # Auto-compute / refresh on visit
         st.session_state["spt_results"] = correct_spt(
             st.session_state.layers, st.session_state.wt_design_bgl
         )
-
-    spt_results = st.session_state["spt_results"]
+        spt_results = st.session_state["spt_results"]
+    except SoilProfileValidationError as exc:
+        spt_results = []
+        st.error(
+            "⚠️ **Cannot compute SPT corrections — fix soil profile in P1:**\n\n"
+            + str(exc)
+        )
 
     if spt_results:
         rows = []

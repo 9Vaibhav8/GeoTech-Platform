@@ -257,6 +257,155 @@ class SoilLayer:
         }
 
 
+# ---------------------------------------------------------------------------
+# Profile Continuity & Depth Coverage Validation
+# ---------------------------------------------------------------------------
+class SoilProfileValidationError(ValueError):
+    """Raised when a soil profile violates thickness, continuity, or depth rules."""
+
+
+@dataclass(frozen=True)
+class ProfileValidationReport:
+    """Structured validation outcome for a layered subsurface profile."""
+
+    is_valid: bool
+    errors: tuple[str, ...]
+    overlaps: tuple[tuple[str, str, float, float], ...]
+    gaps: tuple[tuple[float, float], ...]
+    max_depth_m: float
+
+    def raise_if_invalid(self) -> None:
+        """Raise SoilProfileValidationError if any validation rule failed."""
+        if not self.is_valid:
+            raise SoilProfileValidationError("\n".join(self.errors))
+
+
+def validate_soil_layers(
+    layers: Sequence[Mapping[str, Any] | SoilLayer],
+    required_start_m: float = 0.0,
+    founding_depth_m: Optional[float] = None,
+    required_end_m: Optional[float] = None,
+    tol: float = 1e-6,
+) -> ProfileValidationReport:
+    """
+    Validate layered soil profile geometry for geotechnical analysis:
+      1. Reject empty profiles or layers with depth_bot <= depth_top (or depth_top < 0).
+      2. Detect overlaps and gaps from required_start_m (default 0.0 m bgl).
+      3. Require a valid layer covering founding_depth_m (when provided) and
+         continuous strata through required_end_m (when provided).
+    """
+    errors: list[str] = []
+    overlaps: list[tuple[str, str, float, float]] = []
+    gaps: list[tuple[float, float]] = []
+
+    if not layers:
+        errors.append("Soil profile is empty. Add at least one soil layer.")
+        return ProfileValidationReport(
+            is_valid=False,
+            errors=tuple(errors),
+            overlaps=(),
+            gaps=(),
+            max_depth_m=0.0,
+        )
+
+    valid_entries: list[tuple[int, str, float, float]] = []
+    for idx, raw in enumerate(layers, start=1):
+        if isinstance(raw, SoilLayer):
+            d_top, d_bot = raw.depth_top, raw.depth_bot
+            name = raw.name
+        else:
+            d_top = float(raw["depth_top"])
+            d_bot = float(raw["depth_bot"])
+            name = str(raw.get("name", raw.get("symbol", f"Layer {idx}")))
+
+        if d_top < -tol:
+            errors.append(
+                f"Layer {idx} ({name}): depth_top ({d_top:.2f} m) must be >= 0.00 m bgl."
+            )
+            continue
+        if d_bot <= d_top + tol:
+            errors.append(
+                f"Layer {idx} ({name}): depth_bot ({d_bot:.2f} m) must be greater than "
+                f"depth_top ({d_top:.2f} m) (positive thickness required)."
+            )
+            continue
+        valid_entries.append((idx, name, d_top, d_bot))
+
+    if not valid_entries:
+        return ProfileValidationReport(
+            is_valid=False,
+            errors=tuple(errors),
+            overlaps=(),
+            gaps=(),
+            max_depth_m=0.0,
+        )
+
+    ordered = sorted(valid_entries, key=lambda item: (item[2], item[3]))
+    first_idx, first_name, first_top, first_bot = ordered[0]
+
+    if first_top > required_start_m + tol:
+        gaps.append((required_start_m, first_top))
+        errors.append(
+            f"Gap from {required_start_m:.2f} m to {first_top:.2f} m bgl: "
+            f"profile must start continuously at ground level ({required_start_m:.2f} m)."
+        )
+
+    prev_idx, prev_name, prev_top, prev_end = first_idx, first_name, first_top, first_bot
+    for curr_idx, curr_name, curr_top, curr_bot in ordered[1:]:
+        if curr_top < prev_end - tol:
+            ov_end = min(prev_end, curr_bot)
+            overlaps.append(
+                (f"Layer {prev_idx} ({prev_name})", f"Layer {curr_idx} ({curr_name})", curr_top, ov_end)
+            )
+            errors.append(
+                f"Overlap between Layer {prev_idx} ({prev_name}: {prev_top:.2f}–{prev_end:.2f} m) "
+                f"and Layer {curr_idx} ({curr_name}: {curr_top:.2f}–{curr_bot:.2f} m) "
+                f"over {curr_top:.2f}–{ov_end:.2f} m."
+            )
+        elif curr_top > prev_end + tol:
+            gaps.append((prev_end, curr_top))
+            errors.append(
+                f"Gap between Layer {prev_idx} ({prev_name}, ends {prev_end:.2f} m) "
+                f"and Layer {curr_idx} ({curr_name}, starts {curr_top:.2f} m) "
+                f"over {prev_end:.2f}–{curr_top:.2f} m."
+            )
+        if curr_bot > prev_end:
+            prev_idx, prev_name, prev_top, prev_end = curr_idx, curr_name, curr_top, curr_bot
+
+    max_depth = max(item[3] for item in ordered)
+
+    if founding_depth_m is not None:
+        if founding_depth_m < -tol:
+            errors.append(
+                f"Founding depth Df ({founding_depth_m:.2f} m) must be >= 0.00 m bgl."
+            )
+        else:
+            covers_df = any(
+                (top - tol <= founding_depth_m < bot - tol)
+                for _, _, top, bot in ordered
+            )
+            in_gap = any(g_start - tol <= founding_depth_m <= g_end + tol for g_start, g_end in gaps)
+            if not covers_df or in_gap:
+                errors.append(
+                    f"No valid soil layer covers founding depth Df = {founding_depth_m:.2f} m bgl "
+                    f"(profile extends to {max_depth:.2f} m bgl)."
+                )
+
+    if required_end_m is not None and max_depth < required_end_m - tol:
+        errors.append(
+            f"Insufficient profile depth: profile ends at {max_depth:.2f} m bgl, "
+            f"but required analysis depth is {required_end_m:.2f} m bgl."
+        )
+
+    return ProfileValidationReport(
+        is_valid=(len(errors) == 0),
+        errors=tuple(errors),
+        overlaps=tuple(overlaps),
+        gaps=tuple(gaps),
+        max_depth_m=max_depth,
+    )
+
+
 @dataclass(frozen=True)
 class SoilProfile:
     """
@@ -385,6 +534,20 @@ class SoilProfile:
             if lyr.depth_top <= depth_m < lyr.depth_bot:
                 return lyr
         return self.layers[-1] if self.layers else None
+
+    def validate(
+        self,
+        required_start_m: float = 0.0,
+        founding_depth_m: Optional[float] = None,
+        required_end_m: Optional[float] = None,
+    ) -> ProfileValidationReport:
+        """Validate continuity, thickness, founding depth, and analysis depth."""
+        return validate_soil_layers(
+            self.layers,
+            required_start_m=required_start_m,
+            founding_depth_m=founding_depth_m,
+            required_end_m=required_end_m,
+        )
 
 
 # ---------------------------------------------------------------------------

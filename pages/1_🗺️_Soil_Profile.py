@@ -14,11 +14,16 @@ import pandas as pd
 matplotlib.use("Agg")
 
 from utils.constants import init_session_state, SOIL_SYMBOLS, DEFAULT_LAYER
+from utils.models import validate_soil_layers
 
 st.set_page_config(page_title="P1 — Soil Profile", layout="wide")
 
 # ── Session state ────────────────────────────────────────────────────────────
 init_session_state()
+if "design_df_m" not in st.session_state:
+    st.session_state.design_df_m = 1.5
+if "required_analysis_depth_m" not in st.session_state:
+    st.session_state.required_analysis_depth_m = 5.5
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -55,6 +60,29 @@ with st.sidebar:
     )
     st.caption("ℹ️ Use highest seasonal WT for bearing capacity design.")
 
+    st.divider()
+    st.subheader("📏 Validation Depth Targets")
+    st.session_state.design_df_m = st.number_input(
+        "Founding depth Df (m bgl)",
+        min_value=0.0,
+        max_value=30.0,
+        value=float(st.session_state.design_df_m),
+        step=0.1,
+        format="%.2f",
+        key="sidebar_design_df",
+        help="Requires a valid continuous soil layer covering Df.",
+    )
+    st.session_state.required_analysis_depth_m = st.number_input(
+        "Required analysis depth (m bgl)",
+        min_value=0.0,
+        max_value=60.0,
+        value=float(st.session_state.required_analysis_depth_m),
+        step=0.5,
+        format="%.2f",
+        key="sidebar_req_depth",
+        help="Minimum depth required for settlement/stress analysis (e.g., Df + 2B).",
+    )
+
 # ── Page title ───────────────────────────────────────────────────────────────
 st.title("🗺️ P1 — Soil Profile")
 st.caption(f"Borehole: **{st.session_state.borehole_name}** | Ground RL: **{st.session_state.ground_rl:.2f} m**")
@@ -82,33 +110,48 @@ with col_editor:
         sort_layers()
         st.rerun()
 
-    # Keep track of which layer to delete (avoid mutating list during iteration)
+    # Keep track of which layer to delete and any rejected depth edits
     to_delete = None
+    rejected_depth_errors: list[str] = []
 
     for i, layer in enumerate(st.session_state.layers):
         label = (
             f"**Layer {i + 1}** — {layer['name']} ({layer['symbol']})  "
-            f"| {layer['depth_top']:.1f}–{layer['depth_bot']:.1f} m"
+            f"| {layer['depth_top']:.2f}–{layer['depth_bot']:.2f} m"
         )
         with st.expander(label, expanded=(i == 0)):
 
             c1, c2 = st.columns(2)
             with c1:
-                st.session_state.layers[i]["depth_top"] = st.number_input(
+                new_top = st.number_input(
                     "Depth top (m bgl)",
+                    min_value=0.0,
                     value=float(layer["depth_top"]),
                     step=0.1,
                     format="%.2f",
                     key=f"layer_{i}_depth_top",
                 )
             with c2:
-                st.session_state.layers[i]["depth_bot"] = st.number_input(
+                new_bot = st.number_input(
                     "Depth bottom (m bgl)",
+                    min_value=0.0,
                     value=float(layer["depth_bot"]),
                     step=0.1,
                     format="%.2f",
                     key=f"layer_{i}_depth_bot",
                 )
+
+            if new_bot <= new_top:
+                err_msg = (
+                    f"Layer {i + 1} ({layer['name']}): rejected depth edit "
+                    f"({new_top:.2f}–{new_bot:.2f} m) because depth_bot must be > depth_top. "
+                    f"Retaining last valid bounds ({layer['depth_top']:.2f}–{layer['depth_bot']:.2f} m)."
+                )
+                rejected_depth_errors.append(err_msg)
+                st.error(f"❌ {err_msg}")
+            else:
+                st.session_state.layers[i]["depth_top"] = new_top
+                st.session_state.layers[i]["depth_bot"] = new_bot
 
             c3, c4 = st.columns(2)
             with c3:
@@ -279,6 +322,29 @@ with col_editor:
 
     sort_layers()
 
+    # Validate continuous profile, overlaps, gaps, founding depth, and analysis depth
+    df_target = float(st.session_state.design_df_m)
+    req_depth = max(df_target, float(st.session_state.required_analysis_depth_m))
+    validation_report = validate_soil_layers(
+        st.session_state.layers,
+        required_start_m=0.0,
+        founding_depth_m=df_target,
+        required_end_m=req_depth,
+    )
+    all_profile_errors = rejected_depth_errors + list(validation_report.errors)
+    st.session_state["profile_valid"] = (len(all_profile_errors) == 0)
+
+    if all_profile_errors:
+        st.error(
+            "⚠️ **Soil Profile Validation Issues Detected:**\n\n"
+            + "\n".join(f"- {e}" for e in all_profile_errors)
+        )
+    else:
+        st.success(
+            f"✅ **Valid Continuous Profile:** 0.00–{validation_report.max_depth_m:.2f} m bgl "
+            f"(no gaps/overlaps; covers Df = {df_target:.2f} m and analysis depth {req_depth:.2f} m)."
+        )
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RIGHT COLUMN — Profile Visualization
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -288,7 +354,8 @@ with col_viz:
     layers = st.session_state.layers
     wt_meas = st.session_state.wt_measured_bgl
     wt_des = st.session_state.wt_design_bgl
-    DF = 1.5  # foundation depth
+    DF = float(st.session_state.design_df_m)
+    REQ_D = float(st.session_state.required_analysis_depth_m)
 
     # Hatching patterns by symbol
     HATCH_MAP = {
@@ -326,7 +393,7 @@ with col_viz:
     }
 
     if layers:
-        max_depth = max(l["depth_bot"] for l in layers)
+        max_depth = max([l["depth_bot"] for l in layers] + [REQ_D, DF])
         fig, ax = plt.subplots(figsize=(4.5, max(6, max_depth * 0.6)))
         ax.set_xlim(0, 1)
         ax.set_ylim(max_depth + 0.5, -0.3)  # inverted y-axis (depth increases down)
@@ -341,6 +408,8 @@ with col_viz:
         for layer in layers:
             d_top = layer["depth_top"]
             d_bot = layer["depth_bot"]
+            if d_bot <= d_top:
+                continue
             sym = layer["symbol"]
             color = COLOR_MAP.get(sym, "#cccccc")
             hatch = HATCH_MAP.get(sym, "/")
@@ -365,6 +434,33 @@ with col_viz:
                 fontweight="bold", color="#1a1a1a",
             )
 
+        # Highlight detected gaps & overlaps directly on the profile log
+        for g_start, g_end in validation_report.gaps:
+            gap_rect = mpatches.Rectangle(
+                (0.05, g_start), 0.90, g_end - g_start,
+                facecolor="#fee2e2", edgecolor="#dc2626",
+                linewidth=1.2, linestyle="--", hatch="xx", alpha=0.8,
+            )
+            ax.add_patch(gap_rect)
+            ax.text(
+                0.50, 0.5 * (g_start + g_end),
+                f"GAP ({g_start:.2f}–{g_end:.2f} m)",
+                ha="center", va="center", fontsize=7.5, fontweight="bold", color="#991b1b",
+            )
+
+        for _, _, o_start, o_end in validation_report.overlaps:
+            ov_rect = mpatches.Rectangle(
+                (0.05, o_start), 0.90, o_end - o_start,
+                facecolor="#fef3c7", edgecolor="#d97706",
+                linewidth=1.5, linestyle="-.", hatch="///", alpha=0.65,
+            )
+            ax.add_patch(ov_rect)
+            ax.text(
+                0.50, 0.5 * (o_start + o_end),
+                f"OVERLAP ({o_start:.2f}–{o_end:.2f} m)",
+                ha="center", va="center", fontsize=7.5, fontweight="bold", color="#92400e",
+            )
+
         # Ground-water table lines
         if 0 <= wt_meas <= max_depth:
             ax.axhline(wt_meas, color="blue", linewidth=1.5, linestyle="-", label=f"WT meas = {wt_meas:.1f} m")
@@ -375,11 +471,15 @@ with col_viz:
             ax.text(0.03, wt_des - 0.1, f"WT_d\n({wt_des:.1f} m)", ha="left", va="bottom",
                     color="blue", fontsize=7)
 
-        # Foundation depth Df
+        # Foundation depth Df & required analysis depth
         if 0 <= DF <= max_depth:
-            ax.axhline(DF, color="red", linewidth=1.5, linestyle="--", label=f"Df = {DF} m")
-            ax.text(0.97, DF + 0.1, f"Df = {DF} m", ha="right", va="top",
+            ax.axhline(DF, color="red", linewidth=1.5, linestyle="--", label=f"Df = {DF:.2f} m")
+            ax.text(0.97, DF + 0.1, f"Df = {DF:.2f} m", ha="right", va="top",
                     color="red", fontsize=7, fontweight="bold")
+        if 0 < REQ_D <= max_depth:
+            ax.axhline(REQ_D, color="#7c3aed", linewidth=1.2, linestyle=":", label=f"Req. depth = {REQ_D:.2f} m")
+            ax.text(0.03, REQ_D + 0.1, f"Req = {REQ_D:.2f} m", ha="left", va="top",
+                    color="#7c3aed", fontsize=7, fontweight="bold")
 
         ax.legend(loc="lower right", fontsize=7, framealpha=0.8)
         ax.grid(axis="y", linestyle=":", linewidth=0.4, color="#aaaaaa")

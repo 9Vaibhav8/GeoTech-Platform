@@ -18,6 +18,7 @@ import plotly.express as px
 import streamlit as st
 
 from utils.constants import init_session_state
+from utils.models import SoilProfileValidationError
 from utils.settlement import (
     schmertmann_settlement,
     total_consolidation_settlement,
@@ -81,8 +82,15 @@ layers = st.session_state.layers
 wt     = st.session_state.wt_design_bgl
 
 # ── Run calculations ───────────────────────────────────────────────────────
-imm_result  = schmertmann_settlement(layers, Df, B, L, P_kN, wt, t_years=t_yr)
-cons_result = total_consolidation_settlement(layers, Df, B, L, P_kN, wt)
+try:
+    imm_result  = schmertmann_settlement(layers, Df, B, L, P_kN, wt, t_years=t_yr)
+    cons_result = total_consolidation_settlement(layers, Df, B, L, P_kN, wt)
+except SoilProfileValidationError as exc:
+    st.error(
+        "⚠️ **Cannot run settlement analysis — fix soil profile in P1:**\n\n"
+        + str(exc)
+    )
+    st.stop()
 
 S_i_mm = imm_result["S_mm"]
 S_c_mm = cons_result["S_total_mm"]
