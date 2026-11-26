@@ -364,7 +364,7 @@ def fit_mohr_coulomb(
     Least-squares fit of τ = c′ + σn · tan(φ′).
     Returns (c_prime_kPa, phi_prime_deg, r_squared).
 
-    Cite: Das (2016) Eq. 3.4; IS 2131:1981 (shear-box calibration)
+    Cite: Das (2016) Eq. 3.4; IS 2720 (Part 13):1986 (Direct shear test)
     """
     res = _DEFAULT_MC_FITTER.fit(sigma_n_arr, tau_arr)
     return res.c_prime_kPa, res.phi_prime_deg, res.r_squared

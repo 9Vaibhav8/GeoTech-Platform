@@ -88,7 +88,10 @@ st.divider()
 # SECTION B — MOHR-COULOMB FITTING FROM DIRECT SHEAR
 # ══════════════════════════════════════════════════════════════════════════════
 st.header("B — Strength Parameter Fitting (Direct Shear — Least Squares)")
-st.caption("Fits τ = c′ + σn · tan(φ′) using least-squares linear regression.")
+st.caption(
+    "Fits τ = c′ + σn · tan(φ′) using least-squares linear regression "
+    "(Direct shear test per IS 2720 Part 13:1986)."
+)
 
 # Initialise direct-shear data table in session state
 if "ds_data" not in st.session_state:
@@ -167,7 +170,7 @@ if "mc_fit" in st.session_state:
         )
         st.caption(
             "Method: Least-squares linear regression, τ = c′ + σn · tan(φ′)  \n"
-            "Reference: IS 2131:1981 guidance on parameter determination from laboratory shear-box tests."
+            "Reference: IS 2720 (Part 13):1986 — Direct shear test for determination of c′ and φ′."
         )
 
         # Copy to layer
@@ -213,9 +216,8 @@ st.divider()
 # ══════════════════════════════════════════════════════════════════════════════
 st.header("C — Undrained Shear Strength (cu) from UU Triaxial")
 st.caption(
-    "For UU (unconsolidated undrained) triaxial tests, φu ≈ 0°.  "
-    "cu = (deviator stress at failure) / 2.  "
-    "Average over all tests."
+    "IS 2720 (Part 11):1993 — Unconsolidated undrained (UU) triaxial compression test "
+    "(φu ≈ 0° assumed; cu = deviator stress at failure / 2, averaged over all tests)."
 )
 
 if "uu_data" not in st.session_state:
@@ -280,7 +282,7 @@ if "cu_result" in st.session_state:
 
     st.success(
         f"**cu = {cu_avg:.2f} kPa** (average of {len(cu_res['individual'])} tests)  \n"
-        "φu = 0° assumed (UU test, saturated clay — Skempton 1954)."
+        "φu = 0° assumed (UU triaxial test per IS 2720 Part 11:1993; Skempton 1954)."
     )
 
     # Individual cu values table
