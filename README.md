@@ -1,119 +1,108 @@
-# CE 402 — Geotechnical Engineering Platform
+# CE 402 Geotechnical Engineering Platform
 
-**IIT Mandi · School of Civil and Environmental Engineering**
+An academic Streamlit application for exploring geotechnical inputs and foundation analyses developed for the CE 402 hostel foundation assignment at IIT Mandi.
 
-An interactive web platform for shallow foundation analysis and design of a **G+3 students' hostel** in Mandi, Himachal Pradesh (Seismic Zone V). Built in Python and Streamlit with modular, code-traceable geotechnical solvers in SI units (`kN`, `kPa`, `m`, `mm`).
+**Hosted app:** [Open the platform](https://geotech-platformgit-5hgqwskkbpyo8z2zykgfiq.streamlit.app/)
 
-> **Live Deployment (Streamlit Community Cloud):**  
-https://geotech-platformgit-5hgqwskkbpyo8z2zykgfiq.streamlit.app/ 
+The application is organized as five modules. Soil profile inputs are held in Streamlit session state and used by the relevant analysis pages. Check each page's displayed assumptions and inputs before relying on a result; this project is an academic analysis aid, not a substitute for engineering review.
 
+## Modules
 
----
+| Page | Purpose | Main references shown in the app |
+| --- | --- | --- |
+| **P1 — Soil Profile** | Enter borehole details, water-table depths, soil layers, classifications, unit weights, and strength or laboratory parameters; view the soil profile. | IS 1498 |
+| **P2 — Parameters** | Calculate SPT corrections, fit drained Mohr–Coulomb parameters from direct-shear data, and estimate undrained shear strength from UU test data. | IS 2131:1981; laboratory test data |
+| **P3 — Bearing Capacity** | Estimate shallow-foundation bearing capacity, examine water-table effects, and size footings using the inputs on the page. | IS 6403:1981 |
+| **P4 — Stress Increase** | Estimate vertical stress increase below loaded areas using Boussinesq rectangular-load and 2:1 methods, including superposition of loaded areas. | IS 8009:1976 (as referenced by the app) |
+| **P5 — Settlement** | Estimate immediate and consolidation settlement, explore settlement over time, and compare results with selected permissible-settlement limits. | Schmertmann method; Terzaghi 1-D consolidation; IS 8009:1976; IS 1904:1986 |
 
-## Architecture Overview (SOLID Module Map)
+The pages contain editable inputs and example defaults. Defaults are examples only: enter and verify the data appropriate to your case. Inputs on one analysis page should not be assumed to update every other page unless the page explicitly indicates that they are shared.
 
-The codebase separates presentation/UI (`Home.py`, `pages/`) from pure, deterministic engineering solvers (`utils/`) and automated benchmark verification (`tests/`):
+## Run locally
 
-```text
-GeoTech-Platform/
-├── Home.py                             # Landing page, workflow guide & session initialization
-├── pages/                              # Presentation Layer (Streamlit UI — SRP per module)
-│   ├── 1_🗺️_Soil_Profile.py           # P1: Layered soil profile editor & borehole log plot
-│   ├── 2_⚙️_Parameters.py             # P2: IS 2131 SPT corrections & Mohr-Coulomb / UU fit
-│   ├── 3_🏗️_Bearing_Capacity.py       # P3: IS 6403 bearing capacity & footing sizing
-│   ├── 4_📊_Stress_Increase.py        # P4: Boussinesq & 2:1 stress-bulb visualization
-│   └── 5_📐_Settlement.py             # P5: Schmertmann + 1D consolidation & IS 1904 checks
-├── utils/                              # Domain / Solver Layer (pure NumPy/math, Streamlit-free)
-│   ├── constants.py                    # Shared DEFAULT_LAYER schema, IS 1498 symbols, state init
-│   ├── spt_corrections.py              # IS 2131:1981 overburden (CN), dilatancy & LSQ fitting
-│   ├── bearing_capacity.py             # IS 6403:1981 Nc/Nq/Nγ, shape/depth/inclination/W′, sizing
-│   ├── stress_increase.py              # Boussinesq corner/centre/point superposition & 2:1 method
-│   └── settlement.py                   # Schmertmann (1978) Iz, Terzaghi (1943) 1D consolidation & U(Tv)
-├── tests/                              # Verification Layer
-│   └── test_geotech_benchmarks.py      # Deterministic pytest benchmarks vs IS codes & textbooks
-├── .streamlit/config.toml              # Theme & server configuration
-├── requirements.txt                    # Pinned compatible dependencies
-└── README.md                           # Project documentation & deployment guide
-```
+### Requirements
 
-### SOLID Design Principles Applied
-- **Single Responsibility (SRP):** Each module in `utils/` owns one geotechnical standard or analytical domain (`spt_corrections`, `bearing_capacity`, `stress_increase`, `settlement`), independent of Streamlit widgets.
-- **Open/Closed (OCP):** Stress profiles (`boussinesq_centre`, `boussinesq_corner`, `2to1`) and bearing-capacity shape/failure modes dispatch cleanly through parameterised mappings without altering core solvers.
-- **Interface Segregation & Dependency Inversion:** UI pages consume pure function interfaces accepting explicit lists/scalars (`layers`, `Df`, `B`, `L`, `wt_bgl`) matching the shared `DEFAULT_LAYER` dictionary contract in `utils/constants.py`.
+- Python 3.10 or newer
+- `pip`
 
----
+### Setup
 
-## IS Code & Literature References
+Clone the repository and enter its directory:
 
-| Standard / Reference | Scope in Platform |
-|---|---|
-| **IS 1498:1970** | Soil classification symbols (`SM`, `SP`, `CI`, `GW`, `Fill`) |
-| **IS 2131:1981** | SPT corrections — Annex B overburden $C_N$ (Peck et al., 1974), Cl. 4.6 dilatancy ($N' > 15$ below WT in `SM`/`SP`/`ML`) |
-| **IS 6403:1981** | Shallow foundation bearing capacity — Table 1 ($N_c, N_q, N_\gamma$), Table 2 shape factors, Cl. 5.1.2.1 depth factors, Cl. 5.1.2.3 water-table factor $W'$, Cl. 5.1.3 local shear, Cl. 5.0.1 effective area, Cl. 6 $\text{FOS} = 3.0$ |
-| **IS 8009 (Part 1):1976** | Settlement computation & stress distribution (`2:1` and Boussinesq) |
-| **IS 1904:1986** | Permissible total settlement, differential settlement & angular distortion limits for RC framed buildings |
-| **Schmertmann et al. (1978)** | Strain influence factor $I_z$ method for granular layers (*JGED ASCE* 104(GT8)); $E_s$ correlations via Bowles (1996) |
-| **Terzaghi (1943) & Das (2016)** | 1D consolidation (NC, OC, OC$\to$NC; sublayers $\le 0.5\text{ m}$), time factor $T_v(U)$, Boussinesq corner $I_\sigma$ (incl. obtuse-angle $\pi + \arctan$ branch) |
-
----
-
-## Local Installation & Running
-
-### 1. Clone and create a virtual environment
 ```bash
 git clone https://github.com/9Vaibhav8/GeoTech-Platform.git
 cd GeoTech-Platform
+```
 
-# Windows (PowerShell)
+Create and activate a virtual environment, then install dependencies:
+
+```bash
+# Windows PowerShell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 
 # macOS / Linux
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-```
 
-### 2. Install dependencies
-```bash
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Run the Streamlit application
+Start the Streamlit app:
+
 ```bash
 streamlit run Home.py
 ```
-The app opens locally at `http://localhost:8501`.
 
-### 4. Run the benchmark verification suite
-```bash
-pytest -v
+Streamlit will print the local URL, usually [http://localhost:8501](http://localhost:8501).
+
+## Recommended workflow
+
+1. **P1 — Soil Profile:** Review the example profile or enter the borehole and layer data for your analysis. Check layer depths, soil symbols, unit weights, strength parameters, and measured/design water-table depths.
+2. **P2 — Parameters:** Enter or review SPT and laboratory data. Inspect the correction assumptions and apply fitted values to a layer only after checking that they are appropriate.
+3. **P3 — Bearing Capacity:** Enter footing geometry, founding depth, loading, and design conditions. Review the intermediate values and water-table assumptions.
+4. **P4 — Stress Increase:** Enter the loaded-area geometry, load or pressure, and evaluation depth. Use superposition when modeling multiple loaded areas.
+5. **P5 — Settlement:** Enter or review the column loads, footing sizes, grid, drainage, compressibility, and time-rate inputs. Inspect the differential-settlement comparisons and selected code limits.
+
+Use the displayed equations, assumptions, and cited references to check whether each method suits the problem and the supplied data.
+
+## Repository layout
+
+```text
+GeoTech-Platform/
+├── Home.py
+├── pages/
+│   ├── 1_🗺️_Soil_Profile.py
+│   ├── 2_⚙️_Parameters.py
+│   ├── 3_🏗️_Bearing_Capacity.py
+│   ├── 4_📊_Stress_Increase.py
+│   └── 5_📐_Settlement.py
+├── utils/
+│   ├── constants.py
+│   ├── bearing_capacity.py
+│   ├── spt_corrections.py
+│   ├── stress_increase.py
+│   └── settlement.py
+├── requirements.txt
+└── README.md
 ```
 
----
+## Dependencies
 
-## Assignment Design Basis (CE 402 · Group 3)
+Python package requirements are listed in [`requirements.txt`](requirements.txt). The app uses Streamlit for the interface, NumPy and SciPy for numerical work, Pandas for tabular inputs, Matplotlib for plots, and Plotly for interactive charts.
 
-| Parameter | Design Value |
-|---|---|
-| Group number $g$ / Load factor $\lambda$ | $g = 3$, $\lambda = 1 + g/100 = 1.03$ |
-| Factored service column loads ($\lambda P$) | Corner: `669.5 kN` · Edge: `1030.0 kN` · Interior: `1493.5 kN` |
-| Minimum founding depth $D_f$ | `1.5 m` bgl |
-| Borehole zoning | BH-2 (grids 1–2), BH-1 (grids 3–5), BH-3 (grids 6–7) |
-| Design groundwater levels (August high) | BH-1: `1.0 m` · BH-2: `1.7 m` · BH-3: `0.6 m` bgl |
-| Bearing capacity FOS | `3.0` on net ultimate bearing capacity (IS 6403:1981) |
+## References
 
----
+- IS 1498 — *Classification and identification of soils for general engineering purposes*.
+- IS 2131:1981 — *Method for standard penetration test for soils*.
+- IS 6403:1981 — *Code of practice for determination of bearing capacity of shallow foundations*.
+- IS 8009:1976, Part 1 — *Calculation of settlements of foundations*.
+- IS 1904:1986 — *Code of practice for design and construction of foundations in soils: General requirements*.
+- Schmertmann, J. H., Hartman, J. P., & Brown, P. R. (1978). “Improved strain influence factor diagrams.” *Journal of the Geotechnical Engineering Division*, 104(GT8), 1131–1135.
+- Terzaghi, K. (1943). *Theoretical Soil Mechanics*. John Wiley & Sons.
+- Das, B. M. (2016). *Principles of Foundation Engineering*, 8th ed. Cengage Learning.
 
-## Team Contribution Table
+## Academic context
 
-| Member | GitHub Handle | Primary Ownership & Modules |
-|---|---|---|
-| Vaibhav Pal | `@9Vaibhav8` / `@Ingenuity49_` | Architecture, `Home.py`, P1 Soil Profile, P2 Parameters, DevContainer & Streamlit deployment |
-| Shubham Anand | `@Shubham2310D` | P3 Bearing Capacity (`utils/bearing_capacity.py`), P2/P5 initial solvers & LaTeX fixes |
-| Sumit | `@Sumit` | P4 Stress Increase (`utils/stress_increase.py`, `4_📊_Stress_Increase.py`) |
-| Satendar | `@GitMaster45-tech` | P5 Settlement (`utils/settlement.py`, `5_📐_Settlement.py`), IS 1904 grid checks, QA & Benchmarks |
-
----
-
-## Academic Use & AI Audit
-Submitted for **CE 402 Geotechnical Engineering (IIT Mandi, November 2026)**. See the project report Appendix for the verbatim AI interaction log and engineering audit.
+Developed for IIT Mandi CE 402 coursework. See the submitted assignment report for the project-specific design brief and any required AI-use disclosure.
