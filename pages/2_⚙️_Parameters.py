@@ -1,101 +1,208 @@
 """
 pages/2_⚙️_Parameters.py
-P2 — SPT Corrections & Strength Parameter Fitting
+P2 — IS 2131:1981 SPT Corrections & Strength Parameter Fitting
 CE 402 Geotechnical Engineering Platform — IIT Mandi
+All units strictly SI: m, kPa, kN/m³, deg.
 
 Sections
 --------
-A  IS 2131:1981 SPT N corrections (overburden + dilatancy)
-B  Mohr-Coulomb c′, φ′ fitting from direct-shear data (least squares)
+A  IS 2131:1981 SPT N corrections (overburden Cl. 3.6.1 + dilatancy Cl. 3.6.2)
+B  Mohr-Coulomb c′, φ′ fitting from direct-shear data (OLS)
 C  Undrained shear strength cu from UU triaxial data
 """
 
-import streamlit as st
+import math
 import numpy as np
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
+import streamlit as st
 
 matplotlib.use("Agg")
 
-from utils.constants import init_session_state, SOIL_SYMBOLS
-from utils.spt_corrections import correct_spt, fit_mohr_coulomb
+from utils.constants import init_session_state
+from utils.spt_corrections import (
+    SOIL_CLASSES,
+    build_default_spt_records,
+    correct_spt_records,
+    fit_mohr_coulomb,
+)
 
-st.set_page_config(page_title="P2 — Parameters", layout="wide")
+st.set_page_config(page_title="P2 — Parameters (IS 2131:1981)", layout="wide")
 
 init_session_state()
 
 st.title("⚙️ P2 — SPT Corrections & Parameter Fitting")
+st.caption("IS 2131:1981 SPT N Corrections · Direct Shear OLS · UU Triaxial cu | SI units: m, kPa, deg")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION A — IS 2131:1981 SPT N CORRECTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 st.header("A — IS 2131:1981 SPT N Corrections")
 
-st.info(
-    "**Reference:** IS 2131:1981, Annex B — Overburden correction (Peck, Hanson & Thornburn 1974); "
-    "Clause 4.6 — Dilatancy correction (Terzaghi & Peck 1967)."
+wt_measured = float(st.session_state.wt_measured_bgl)
+wt_design = float(st.session_state.wt_design_bgl)
+
+wt_c1, wt_c2 = st.columns(2)
+wt_c1.metric(
+    "Measured WT used for SPT corrections (test-time)",
+    f"{wt_measured:.2f} m bgl",
+    help="IS 2131:1981 uses the groundwater table measured during boring for σ′v and dilatancy.",
+)
+wt_c2.metric(
+    "Design WT (for bearing/settlement only — NOT used here)",
+    f"{wt_design:.2f} m bgl",
 )
 
-layers_with_spt = [
-    (i, l) for i, l in enumerate(st.session_state.layers) if l.get("N_field") is not None
-]
+st.info(
+    "**IS 2131:1981 Reference:** "
+    "**Cl. 3.6.1 & Fig. 1** — Overburden correction $C_N = \\min(2.0,\\; 0.77\\log_{10}(2000/\\sigma'_v))$ "
+    "applies **only** to cohesionless sands (`Fine/Silty Sand`, `Coarse/Medium Sand`); "
+    "**Cl. 3.6.2** — Dilatancy correction $N'' = 15 + 0.5(N' - 15)$ applies **only** to `Fine/Silty Sand` "
+    "below measured WT (`wt_measured_bgl`) when $N' > 15$. Raw $N \\ge 100$ is flagged as **Refusal**."
+)
 
-if not layers_with_spt:
-    st.warning("No layers with SPT N_field values. Add observed SPT N values in P1 — Soil Profile.")
+if "spt_records" not in st.session_state:
+    st.session_state["spt_records"] = build_default_spt_records(st.session_state.layers)
+
+ctrl_col1, ctrl_col2 = st.columns([1.4, 2.6])
+with ctrl_col1:
+    if st.button("🔄 Sync / Reset SPT rows from P1 Layers", key="btn_reset_spt_records"):
+        st.session_state["spt_records"] = build_default_spt_records(st.session_state.layers)
+        st.rerun()
+
+st.markdown("**Depth-specific SPT test records** *(add, edit, or delete rows freely)*:")
+
+df_input = pd.DataFrame(
+    st.session_state["spt_records"]
+    if st.session_state["spt_records"]
+    else [{"depth_m": 1.5, "soil_class": "Fine/Silty Sand", "N_field": 12}]
+)
+
+edited_df = st.data_editor(
+    df_input,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="spt_data_editor",
+    column_config={
+        "depth_m": st.column_config.NumberColumn(
+            "Test Depth (m bgl)",
+            min_value=0.0,
+            max_value=100.0,
+            step=0.1,
+            format="%.2f",
+            required=True,
+        ),
+        "soil_class": st.column_config.SelectboxColumn(
+            "Soil Class (IS 2131 Applicability)",
+            options=SOIL_CLASSES,
+            required=True,
+        ),
+        "N_field": st.column_config.NumberColumn(
+            "Raw N_field (blows/300 mm)",
+            min_value=0,
+            max_value=500,
+            step=1,
+            format="%d",
+            required=True,
+        ),
+    },
+)
+
+# Persist valid edited records back to session state
+valid_records = []
+for _, row in edited_df.iterrows():
+    if pd.notna(row.get("depth_m")) and pd.notna(row.get("N_field")) and pd.notna(row.get("soil_class")):
+        valid_records.append({
+            "depth_m": float(row["depth_m"]),
+            "soil_class": str(row["soil_class"]),
+            "N_field": int(round(float(row["N_field"]))),
+        })
+
+st.session_state["spt_records"] = valid_records
+
+if not valid_records:
+    st.warning("Add at least one SPT test record above (or define N_field values in P1).")
 else:
-    if st.button("🔄 Compute / Refresh SPT Corrections", key="btn_compute_spt"):
-        results = correct_spt(st.session_state.layers, st.session_state.wt_design_bgl)
-        st.session_state["spt_results"] = results
+    spt_results = correct_spt_records(
+        valid_records,
+        st.session_state.layers,
+        wt_measured_bgl=wt_measured,
+    )
+    st.session_state["spt_results"] = spt_results
 
-    # Auto-compute on first visit
-    if "spt_results" not in st.session_state:
-        st.session_state["spt_results"] = correct_spt(
-            st.session_state.layers, st.session_state.wt_design_bgl
+    display_rows = []
+    for r in spt_results:
+        if r["is_refusal"]:
+            cn_disp = "—"
+            n_prime_disp = "Refusal"
+            n_final_disp = "Refusal"
+        elif r["CN"] is None:
+            cn_disp = "—"
+            n_prime_disp = f"{r['N_prime']}"
+            n_final_disp = f"{r['N_final']}"
+        else:
+            cn_disp = f"{r['CN']:.3f}"
+            n_prime_disp = f"{r['N_prime']}"
+            n_final_disp = f"{r['N_final']}"
+
+        display_rows.append({
+            "Depth (m)": f"{r['depth_m']:.2f}",
+            "Soil Class": r["soil_class"],
+            "Raw N (blows/300 mm)": r["N_field"],
+            "σ′v (kPa)": f"{r['sigma_v']:.2f}",
+            "C_N (—)": cn_disp,
+            "N′ (—)": n_prime_disp,
+            "Below Meas. WT?": "Yes" if r["below_wt"] else "No",
+            "Dilatancy Applied?": "✅ Yes" if r["dilatancy_applied"] else "No",
+            "Final N″ (—)": n_final_disp,
+            "Notes": r["notes"],
+        })
+
+    df_spt = pd.DataFrame(display_rows)
+    st.dataframe(df_spt, use_container_width=True, hide_index=True)
+
+    # Sync layer-averaged non-refusal Final N'' back to P1 layers for downstream P5
+    if st.button("📋 Apply layer-averaged Final N″ to P1 Soil Layers (for P5)", key="btn_apply_spt_layers"):
+        updated_msgs = []
+        sorted_indices = sorted(
+            range(len(st.session_state.layers)),
+            key=lambda idx: float(st.session_state.layers[idx]["depth_top"]),
         )
-
-    spt_results = st.session_state["spt_results"]
-
-    if spt_results:
-        rows = []
-        for r in spt_results:
-            layer = st.session_state.layers[r["layer_idx"]]
-            rows.append({
-                "Layer": f"{r['layer_idx'] + 1} — {layer['name']}",
-                "Symbol": layer["symbol"],
-                "Depth mid (m)": f"{r['depth_mid']:.2f}",
-                "σ′v (kPa)": f"{r['sigma_v']:.1f}",
-                "CN": f"{r['CN']:.3f}",
-                "N_field": r["N_field"],
-                "N_corr1": r["N_corr1"],
-                "Dilatancy?": "✅ Yes" if r["dilatancy_applied"] else "No",
-                "N_corrected": r["N_corrected"],
-            })
-        df_spt = pd.DataFrame(rows)
-        st.dataframe(df_spt, use_container_width=True, hide_index=True)
-
-        st.caption(
-            "**Formulae used:**  "
-            "C_N = 0.77 × log₁₀(2000 / σ′v) [clamped 0.5 – 2.0]; "
-            "Dilatancy: N_cor = 15 + 0.5(N_corr1 − 15) for SM/ML/SP below WT when N_corr1 > 15."
-        )
-    else:
-        st.info("No SPT results computed.")
+        for pos, idx in enumerate(sorted_indices):
+            lyr = st.session_state.layers[idx]
+            d_top = float(lyr["depth_top"])
+            d_bot = float(lyr["depth_bot"])
+            is_last = pos == len(sorted_indices) - 1
+            in_layer = [
+                r["N_final"]
+                for r in spt_results
+                if (not r["is_refusal"])
+                and (r["N_final"] is not None)
+                and (d_top <= r["depth_m"] < d_bot or (is_last and d_top <= r["depth_m"] <= d_bot))
+            ]
+            if in_layer:
+                avg_n = int(round(sum(in_layer) / len(in_layer)))
+                lyr["N_corrected"] = avg_n
+                updated_msgs.append(f"Layer {idx + 1} ({lyr['name']}): N_corrected = {avg_n}")
+        if updated_msgs:
+            st.success("Updated P1 layers: " + " | ".join(updated_msgs))
+        else:
+            st.warning("No non-refusal SPT records matched P1 layer depth intervals.")
 
 st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION B — MOHR-COULOMB FITTING FROM DIRECT SHEAR
+# SECTION B — MOHR-COULOMB FITTING FROM DIRECT SHEAR (OLS)
 # ══════════════════════════════════════════════════════════════════════════════
-st.header("B — Strength Parameter Fitting (Direct Shear — Least Squares)")
-st.caption("Fits τ = c′ + σn · tan(φ′) using least-squares linear regression.")
+st.header("B — Strength Parameter Fitting (Direct Shear — Ordinary Least Squares)")
+st.caption("Fits τ_f = c′ + σ_n · tan(φ′) by OLS linear regression (SI units: kPa, deg).")
 
-# Initialise direct-shear data table in session state
 if "ds_data" not in st.session_state:
     st.session_state["ds_data"] = [
         {"sigma_n": 50.0, "tau": 35.0},
         {"sigma_n": 100.0, "tau": 65.0},
-        {"sigma_n": 200.0, "tau": 115.0},
+        {"sigma_n": 150.0, "tau": 95.0},
     ]
 
 col_ds_ctrl, _ = st.columns([1, 3])
@@ -108,29 +215,29 @@ with col_ds_ctrl:
             st.session_state["ds_data"].pop()
             st.rerun()
 
-st.markdown("**Enter direct shear data points:**")
+st.markdown("**Enter direct shear test data points:**")
 ds_cols = st.columns([0.4, 0.4, 0.2])
-ds_cols[0].markdown("**σn (kPa) — Normal stress**")
-ds_cols[1].markdown("**τf (kPa) — Shear stress at failure**")
+ds_cols[0].markdown("**Normal stress σ_n (kPa)**")
+ds_cols[1].markdown("**Peak shear stress τ_f (kPa)**")
 
 to_remove_ds = None
 for j, row in enumerate(st.session_state["ds_data"]):
     c1, c2, c3 = st.columns([0.4, 0.4, 0.2])
     with c1:
         st.session_state["ds_data"][j]["sigma_n"] = st.number_input(
-            f"σn #{j + 1}",
+            f"σ_n (kPa) #{j + 1}",
             value=float(row["sigma_n"]),
             step=1.0,
-            format="%.1f",
+            format="%.2f",
             key=f"ds_sigma_{j}",
             label_visibility="collapsed",
         )
     with c2:
         st.session_state["ds_data"][j]["tau"] = st.number_input(
-            f"τf #{j + 1}",
+            f"τ_f (kPa) #{j + 1}",
             value=float(row["tau"]),
             step=1.0,
-            format="%.1f",
+            format="%.2f",
             key=f"ds_tau_{j}",
             label_visibility="collapsed",
         )
@@ -142,7 +249,7 @@ if to_remove_ds is not None:
     st.session_state["ds_data"].pop(to_remove_ds)
     st.rerun()
 
-if st.button("📐 Fit c′ and φ′", key="btn_fit_mc"):
+if st.button("📐 Fit c′ (kPa) and φ′ (deg)", key="btn_fit_mc"):
     sigma_n_vals = [r["sigma_n"] for r in st.session_state["ds_data"]]
     tau_vals = [r["tau"] for r in st.session_state["ds_data"]]
     if len(sigma_n_vals) < 2:
@@ -150,8 +257,13 @@ if st.button("📐 Fit c′ and φ′", key="btn_fit_mc"):
     else:
         try:
             c_fit, phi_fit, r2 = fit_mohr_coulomb(sigma_n_vals, tau_vals)
-            st.session_state["mc_fit"] = {"c": c_fit, "phi": phi_fit, "r2": r2,
-                                          "sigma_n": sigma_n_vals, "tau": tau_vals}
+            st.session_state["mc_fit"] = {
+                "c": c_fit,
+                "phi": phi_fit,
+                "r2": r2,
+                "sigma_n": sigma_n_vals,
+                "tau": tau_vals,
+            }
         except Exception as e:
             st.error(f"Fitting error: {e}")
 
@@ -162,44 +274,48 @@ if "mc_fit" in st.session_state:
     with col_res:
         st.success(
             f"**c′ = {fit['c']:.2f} kPa**  \n"
-            f"**φ′ = {fit['phi']:.2f}°**  \n"
-            f"R² = {fit['r2']:.4f}"
+            f"**φ′ = {fit['phi']:.2f} deg**  \n"
+            f"**R² = {fit['r2']:.4f} (—)**"
         )
         st.caption(
-            "Method: Least-squares linear regression, τ = c′ + σn · tan(φ′)  \n"
-            "Reference: IS 2131:1981 guidance on parameter determination from laboratory shear-box tests."
+            "Method: Ordinary Least Squares regression, τ_f = c′ + σ_n · tan(φ′) "
+            "(IS 2720 Part 13 / IS 2131:1981)."
         )
 
-        # Copy to layer
         layer_names = [
             f"{i + 1} — {l['name']}" for i, l in enumerate(st.session_state.layers)
         ]
         target_layer = st.selectbox(
-            "Copy fitted c′, φ′ to layer:", layer_names, key="mc_copy_layer"
+            "Copy fitted c′ (kPa), φ′ (deg) to layer:", layer_names, key="mc_copy_layer"
         )
         if st.button("📋 Apply to layer", key="btn_mc_apply"):
             idx = layer_names.index(target_layer)
-            st.session_state.layers[idx]["c_prime"] = round(fit["c"], 2)
+            st.session_state.layers[idx]["c_prime"] = max(0.0, round(fit["c"], 2))
             st.session_state.layers[idx]["phi_prime"] = round(fit["phi"], 2)
             st.success(
-                f"Applied c′ = {fit['c']:.2f} kPa, φ′ = {fit['phi']:.2f}° "
+                f"Applied c′ = {max(0.0, fit['c']):.2f} kPa, φ′ = {fit['phi']:.2f} deg "
                 f"to Layer {idx + 1}."
             )
 
     with col_plot:
-        sigma_n_arr = np.asarray(fit["sigma_n"])
-        tau_arr = np.asarray(fit["tau"])
-        sigma_range = np.linspace(0, max(sigma_n_arr) * 1.15, 200)
-        import math as _math
-        tau_fit_line = fit["c"] + sigma_range * _math.tan(_math.radians(fit["phi"]))
+        sigma_n_arr = np.asarray(fit["sigma_n"], dtype=float)
+        tau_arr = np.asarray(fit["tau"], dtype=float)
+        sigma_range = np.linspace(0.0, max(float(np.max(sigma_n_arr)), 10.0) * 1.15, 200)
+        # Source: Mohr-Coulomb linear failure envelope τ_f = c' + σ_n tan(φ')
+        tau_fit_line = fit["c"] + sigma_range * math.tan(math.radians(fit["phi"]))
 
         fig, ax = plt.subplots(figsize=(5, 3.5))
-        ax.scatter(sigma_n_arr, tau_arr, color="steelblue", zorder=5, label="Data points")
-        ax.plot(sigma_range, tau_fit_line, "r-", linewidth=1.8,
-                label=f"Fit: τ = {fit['c']:.1f} + σn·tan({fit['phi']:.1f}°)")
-        ax.set_xlabel("Normal stress σn (kPa)")
-        ax.set_ylabel("Shear stress τf (kPa)")
-        ax.set_title("Mohr-Coulomb Failure Envelope", fontsize=10)
+        ax.scatter(sigma_n_arr, tau_arr, color="steelblue", zorder=5, label="Lab data")
+        ax.plot(
+            sigma_range,
+            tau_fit_line,
+            "r-",
+            linewidth=1.8,
+            label=f"OLS Fit: τ = {fit['c']:.2f} + σ_n·tan({fit['phi']:.2f}°)",
+        )
+        ax.set_xlabel("Normal stress σ_n (kPa)")
+        ax.set_ylabel("Shear stress τ_f (kPa)")
+        ax.set_title("Mohr-Coulomb Failure Envelope (OLS)", fontsize=10)
         ax.legend(fontsize=8)
         ax.grid(True, linestyle=":", alpha=0.6)
         fig.tight_layout()
@@ -211,17 +327,17 @@ st.divider()
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION C — UNDRAINED SHEAR STRENGTH FROM UU TRIAXIAL
 # ══════════════════════════════════════════════════════════════════════════════
-st.header("C — Undrained Shear Strength (cu) from UU Triaxial")
+st.header("C — Undrained Shear Strength cu (kPa) from UU Triaxial")
 st.caption(
-    "For UU (unconsolidated undrained) triaxial tests, φu ≈ 0°.  "
-    "cu = (deviator stress at failure) / 2.  "
-    "Average over all tests."
+    "For saturated clay UU triaxial tests (φ_u = 0 deg): "
+    "c_u = (σ₁ − σ₃)_f / 2 (kPa). Average over all tests."
 )
 
 if "uu_data" not in st.session_state:
     st.session_state["uu_data"] = [
-        {"sigma3": 50.0, "deviator": 80.0},
-        {"sigma3": 100.0, "deviator": 82.0},
+        {"sigma3": 50.0, "deviator": 57.2},
+        {"sigma3": 100.0, "deviator": 55.8},
+        {"sigma3": 150.0, "deviator": 58.1},
     ]
 
 col_uu_ctrl, _ = st.columns([1, 3])
@@ -236,27 +352,27 @@ with col_uu_ctrl:
 
 st.markdown("**Enter UU triaxial test data:**")
 uu_hdr = st.columns([0.4, 0.4, 0.2])
-uu_hdr[0].markdown("**σ₃ (kPa) — Cell pressure**")
-uu_hdr[1].markdown("**Deviator stress at failure (kPa)**")
+uu_hdr[0].markdown("**Cell pressure σ₃ (kPa)**")
+uu_hdr[1].markdown("**Deviator stress at failure Δσ_f (kPa)**")
 
 to_remove_uu = None
 for j, row in enumerate(st.session_state["uu_data"]):
     cu1, cu2, cu3 = st.columns([0.4, 0.4, 0.2])
     with cu1:
         st.session_state["uu_data"][j]["sigma3"] = st.number_input(
-            f"σ₃ #{j + 1}",
+            f"σ₃ (kPa) #{j + 1}",
             value=float(row["sigma3"]),
             step=1.0,
-            format="%.1f",
+            format="%.2f",
             key=f"uu_sigma3_{j}",
             label_visibility="collapsed",
         )
     with cu2:
         st.session_state["uu_data"][j]["deviator"] = st.number_input(
-            f"Dev #{j + 1}",
+            f"Δσ_f (kPa) #{j + 1}",
             value=float(row["deviator"]),
             step=1.0,
-            format="%.1f",
+            format="%.2f",
             key=f"uu_dev_{j}",
             label_visibility="collapsed",
         )
@@ -268,10 +384,11 @@ if to_remove_uu is not None:
     st.session_state["uu_data"].pop(to_remove_uu)
     st.rerun()
 
-if st.button("🧮 Compute cu", key="btn_compute_cu"):
-    devs = [r["deviator"] for r in st.session_state["uu_data"]]
+if st.button("🧮 Compute cu (kPa)", key="btn_compute_cu"):
+    devs = [float(r["deviator"]) for r in st.session_state["uu_data"]]
+    # Source: IS 2720 Part 11 / Mohr circle for φ_u = 0: c_u = (σ1 - σ3)_f / 2
     cu_vals = [d / 2.0 for d in devs]
-    cu_avg = float(np.mean(cu_vals))
+    cu_avg = float(sum(cu_vals) / len(cu_vals))
     st.session_state["cu_result"] = {"cu": cu_avg, "individual": cu_vals}
 
 if "cu_result" in st.session_state:
@@ -279,38 +396,34 @@ if "cu_result" in st.session_state:
     cu_avg = cu_res["cu"]
 
     st.success(
-        f"**cu = {cu_avg:.2f} kPa** (average of {len(cu_res['individual'])} tests)  \n"
-        "φu = 0° assumed (UU test, saturated clay — Skempton 1954)."
+        f"**c_u = {cu_avg:.2f} kPa** (average of {len(cu_res['individual'])} tests)  \n"
+        "φ_u = 0.0 deg assumed (UU test on saturated cohesive soil — IS 2720 Part 11)."
     )
 
-    # Individual cu values table
     cu_df = pd.DataFrame({
         "Test": [f"T{j + 1}" for j in range(len(st.session_state["uu_data"]))],
-        "σ₃ (kPa)": [r["sigma3"] for r in st.session_state["uu_data"]],
-        "Deviator (kPa)": [r["deviator"] for r in st.session_state["uu_data"]],
-        "cu = Dev/2 (kPa)": [round(v, 2) for v in cu_res["individual"]],
+        "σ₃ (kPa)": [round(float(r["sigma3"]), 2) for r in st.session_state["uu_data"]],
+        "Deviator Δσ_f (kPa)": [round(float(r["deviator"]), 2) for r in st.session_state["uu_data"]],
+        "c_u = Δσ_f / 2 (kPa)": [round(v, 2) for v in cu_res["individual"]],
     })
     st.dataframe(cu_df, use_container_width=False, hide_index=True)
 
-    # Copy to clay layer
     clay_layers = [
         (i, l) for i, l in enumerate(st.session_state.layers) if l.get("is_clay")
     ]
     if clay_layers:
         clay_names = [f"{i + 1} — {l['name']}" for i, l in clay_layers]
         target_cu = st.selectbox(
-            "Copy cu to clay layer:", clay_names, key="cu_copy_layer"
+            "Copy cu (kPa) to clay layer:", clay_names, key="cu_copy_layer"
         )
         if st.button("📋 Apply cu to layer", key="btn_cu_apply"):
-            # Find the actual layer index from the display name
-            chosen_name = target_cu
             for i, l in clay_layers:
-                if chosen_name == f"{i + 1} — {l['name']}":
+                if target_cu == f"{i + 1} — {l['name']}":
                     st.session_state.layers[i]["cu"] = round(cu_avg, 2)
                     st.session_state.layers[i]["is_undrained"] = True
                     st.success(
                         f"Applied cu = {cu_avg:.2f} kPa to Layer {i + 1} "
-                        f"({l['name']}) and set undrained flag."
+                        f"({l['name']}) and enabled undrained (φ = 0) flag."
                     )
                     break
     else:
