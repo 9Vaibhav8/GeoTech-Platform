@@ -12,44 +12,35 @@ def boussinesq_corner(q, B, L, z):
     """
     Boussinesq vertical stress increase Δσz at depth z below the CORNER
     of a uniformly loaded rectangle (B × L) with pressure q (kPa).
-
-    Uses the standard Newmark / Das formula:
-        m1 = B/z,  n1 = L/z
-        A1 = (2·m1·n1·√(1+m1²+n1²)) / (1+m1²+n1²+m1²·n1²) × (1+m1²+n1²+1)/(1+m1²+n1²)
-           ← simplified to the standard two-term Iσ expression below
-        Iσ = (1/(4π)) × [A1 + A2]
-        Δσz = q × Iσ
-
-    For z = 0 returns q (uniform surface pressure right at corner).
-    Cite: Boussinesq (1885); Das (2016) Eq. 5.37
     """
-    if np.isscalar(z):
-        if z <= 0:
-            return float(q)
-        m1 = float(B) / z
-        n1 = float(L) / z
-        q_term = 1.0 + m1 ** 2 + n1 ** 2  # (1 + m² + n²)
+    if B <= 0 or L <= 0:
+        raise ValueError(f"Footing dimensions B and L must be positive, got B={B}, L={L}")
+
+    is_scalar = np.isscalar(z)
+    z_arr = np.atleast_1d(np.asarray(z, dtype=float))
+
+    if np.any(z_arr < 0):
+        raise ValueError("Depth z must be non-negative (z >= 0).")
+
+    result = np.empty_like(z_arr, dtype=float)
+    zero_mask = (z_arr == 0.0)
+    result[zero_mask] = 0.25 * float(q)  # exact Boussinesq corner limit as z -> 0+
+
+    pos_mask = ~zero_mask
+    if np.any(pos_mask):
+        z_pos = z_arr[pos_mask]
+        m1 = float(B) / z_pos
+        n1 = float(L) / z_pos
+        q_term = 1.0 + m1 ** 2 + n1 ** 2
         mn = m1 * n1
         sqrt_q = np.sqrt(q_term)
 
-        A1_num = 2.0 * mn * sqrt_q * (q_term + 1.0)
-        A1_den = q_term * (q_term + mn ** 2)
-        A1 = A1_num / A1_den
+        A1 = (2.0 * mn * sqrt_q * (q_term + 1.0)) / (q_term * (q_term + mn ** 2))
+        A2 = np.arctan2(2.0 * mn * sqrt_q, q_term - mn ** 2)
 
-        # arctan argument
-        arg = (2.0 * mn * sqrt_q) / (q_term - mn ** 2)
-        A2 = np.arctan(arg)
-        if (q_term - mn ** 2) < 0:   # add π when denominator negative
-            A2 += np.pi
+        result[pos_mask] = float(q) * (A1 + A2) / (4.0 * np.pi)
 
-        Isigma = (A1 + A2) / (4.0 * np.pi)
-        return q * Isigma
-    else:
-        z = np.asarray(z, dtype=float)
-        result = np.empty_like(z)
-        for i, zi in enumerate(z.flat):
-            result.flat[i] = boussinesq_corner(q, B, L, zi)
-        return result
+    return float(result[0]) if is_scalar else result
 
 
 def stress_increase_centre(q, B, L, z):
@@ -64,144 +55,160 @@ def stress_increase_centre(q, B, L, z):
 
 def stress_increase_point(q, B, L, x_offset, y_offset, z):
     """
-    Δσz at depth z below an arbitrary point that is x_offset from one corner
-    along B-direction and y_offset from that corner along L-direction.
-    Uses superposition of up to 4 rectangles (Newmark 1935 method).
-
-    The point divides B into (x_offset, B - x_offset) and
-    L into (y_offset, L - y_offset).
-
-    Cite: Newmark (1935) superposition method.
+    Δσz at depth z below an arbitrary point (x_offset, y_offset) relative to
+    one corner of a uniformly loaded rectangle (B × L).
+    Works for interior, edge, corner, and exterior points via Newmark (1935)
+    signed superposition.
     """
-    x1, x2 = x_offset, B - x_offset
-    y1, y2 = y_offset, L - y_offset
+    if B <= 0 or L <= 0:
+        raise ValueError(f"Footing dimensions B and L must be positive, got B={B}, L={L}")
 
-    dsigma = (boussinesq_corner(q, x1, y1, z) +
-              boussinesq_corner(q, x2, y1, z) +
-              boussinesq_corner(q, x1, y2, z) +
-              boussinesq_corner(q, x2, y2, z))
-    return dsigma
+    x_parts = (x_offset, B - x_offset)
+    y_parts = (y_offset, L - y_offset)
+
+    dsigma = 0.0 if np.isscalar(z) else np.zeros_like(np.asarray(z, dtype=float))
+
+    for dx in x_parts:
+        if dx == 0.0:
+            continue
+        for dy in y_parts:
+            if dy == 0.0:
+                continue
+            sign = (1.0 if dx > 0 else -1.0) * (1.0 if dy > 0 else -1.0)
+            dsigma = dsigma + sign * boussinesq_corner(q, abs(dx), abs(dy), z)
+
+    return float(dsigma) if np.isscalar(z) else dsigma
 
 
 def stress_increase_2to1(q, B, L, z):
     """
-    2:1 method vertical stress increase.
+    2:1 (2V:1H) approximate vertical stress increase below a rectangular
+    loaded area (B × L) with uniform pressure q (kPa):
         Δσz = (q × B × L) / ((B + z) × (L + z))
-    For z = 0 returns q.
-    Cite: 2:1 load distribution method (IS 8009:1976)
     """
-    if np.isscalar(z):
-        if z <= 0:
-            return float(q)
-        return float(q) * float(B) * float(L) / ((B + z) * (L + z))
-    else:
-        z = np.asarray(z, dtype=float)
-        result = np.where(z <= 0, float(q),
-                          float(q) * float(B) * float(L) / ((B + z) * (L + z)))
-        return result
+    if B <= 0 or L <= 0:
+        raise ValueError(f"Footing dimensions B and L must be positive, got B={B}, L={L}")
 
+    if np.isscalar(z):
+        if z < 0:
+            raise ValueError(f"Depth z must be non-negative, got {z}")
+        return float(q) * float(B) * float(L) / ((B + z) * (L + z))
+
+    z_arr = np.asarray(z, dtype=float)
+    if np.any(z_arr < 0):
+        raise ValueError("Depth z must be non-negative (z >= 0).")
+
+    return float(q) * float(B) * float(L) / ((B + z_arr) * (L + z_arr))
 
 def stress_profile(q, B, L, z_max, method="boussinesq_centre", n_points=50):
     """
-    Compute Δσz at multiple depths from 0 to z_max.
-
-    Parameters
-    ----------
-    q : float
-        Net foundation pressure (kPa).
-    B, L : float
-        Footing dimensions (m).
-    z_max : float
-        Maximum depth below footing (m).
-    method : str
-        One of "boussinesq_centre", "boussinesq_corner", "2to1".
-    n_points : int
-        Number of evaluation points.
-
-    Returns
-    -------
-    z_array : np.ndarray
-        Depths (m), 0 to z_max.
-    delta_sigma_array : np.ndarray
-        Corresponding Δσz values (kPa).
+    Compute Δσz at n_points depths uniformly spaced from 0 to z_max.
     """
-    z_array = np.linspace(0.001, z_max, n_points)  # avoid z=0 numerical issue
-    z_array = np.concatenate(([0.0], z_array))
+    if z_max <= 0:
+        raise ValueError(f"z_max must be positive, got {z_max}")
+    if n_points < 2:
+        raise ValueError(f"n_points must be at least 2, got {n_points}")
+
+    z_array = np.linspace(0.0, float(z_max), int(n_points))
 
     if method == "boussinesq_centre":
-        delta_sigma_array = np.array([stress_increase_centre(q, B, L, z) for z in z_array])
+        delta_sigma_array = stress_increase_centre(q, B, L, z_array)
     elif method == "boussinesq_corner":
-        delta_sigma_array = np.array([boussinesq_corner(q, B, L, z) for z in z_array])
+        delta_sigma_array = boussinesq_corner(q, B, L, z_array)
     elif method == "2to1":
         delta_sigma_array = stress_increase_2to1(q, B, L, z_array)
     else:
-        raise ValueError(f"Unknown method '{method}'. "
-                         "Choose from 'boussinesq_centre', 'boussinesq_corner', '2to1'.")
+        raise ValueError(
+            f"Unknown method '{method}'. "
+            "Choose from 'boussinesq_centre', 'boussinesq_corner', '2to1'."
+        )
 
     return z_array, delta_sigma_array
 
+def influence_depth(q, B, L, threshold=0.1, method="boussinesq_centre", tol=1e-4):
+    """
+    Find the exact depth z* (m) where Δσz / q == threshold using adaptive
+    bracketing and bisection (no arbitrary 5B cutoff).
+    """
+    if q <= 0:
+        raise ValueError(f"Pressure q must be positive, got {q}")
+    if B <= 0 or L <= 0:
+        raise ValueError(f"Footing dimensions B and L must be positive, got B={B}, L={L}")
+    if not (0.0 < threshold < 1.0):
+        raise ValueError(f"threshold must be in (0, 1), got {threshold}")
 
-def influence_depth(q, B, L, threshold=0.1, method="boussinesq_centre", n_points=500):
-    """
-    Find the depth z* where Δσz / q ≤ threshold (default 10% of q).
-    Returns z* in metres, or z_max if threshold not reached within 5B.
-    """
-    z_max = 5.0 * B
-    z_arr, ds_arr = stress_profile(q, B, L, z_max, method=method, n_points=n_points)
-    ratio = ds_arr / q
-    idx = np.where(ratio <= threshold)[0]
-    if len(idx) == 0:
-        return z_max
-    return float(z_arr[idx[0]])
+    method_map = {
+        "boussinesq_centre": stress_increase_centre,
+        "boussinesq_corner": boussinesq_corner,
+        "2to1": stress_increase_2to1,
+    }
+    if method not in method_map:
+        raise ValueError(
+            f"Unknown method '{method}'. "
+            "Choose from 'boussinesq_centre', 'boussinesq_corner', '2to1'."
+        )
+    fn = method_map[method]
+
+    # Ratio at surface z = 0 (1.0 for centre/2:1, 0.25 for corner)
+    if fn(1.0, B, L, 0.0) <= threshold:
+        return 0.0
+
+    # Adaptively bracket z* by doubling z_hi until ratio <= threshold
+    z_lo, z_hi = 0.0, float(B)
+    while fn(1.0, B, L, z_hi) > threshold:
+        z_lo = z_hi
+        z_hi *= 2.0
+
+    # Bisection (exact since Δσz(z) is strictly decreasing)
+    while (z_hi - z_lo) > tol:
+        z_mid = 0.5 * (z_lo + z_hi)
+        if fn(1.0, B, L, z_mid) > threshold:
+            z_lo = z_mid
+        else:
+            z_hi = z_mid
+
+    return 0.5 * (z_lo + z_hi)
 
 
 def effective_stress_profile(layers, wt_design_bgl, z_array, Df=0.0):
     """
-    Compute effective vertical stress σ′v0 at each depth in z_array.
-    z_array is measured from the footing base (i.e., add Df to get depth bgl).
-
-    Parameters
-    ----------
-    layers : list of dict
-        Each dict has depth_top, depth_bot, gamma_moist, gamma_sat keys.
-    wt_design_bgl : float
-        Water table depth below ground level (m bgl).
-    z_array : array-like
-        Depths below footing base (m).
-    Df : float
-        Footing embedment depth below ground level (m).
-
-    Returns
-    -------
-    sigma_v0 : np.ndarray
-        Effective vertical stress (kPa) at each depth in z_array.
+    Compute vertical effective overburden stress σ'v0 (kPa) at depths (z + Df)
+    below ground level across a stratified soil profile.
     """
+    if not layers:
+        raise ValueError("layers must be a non-empty sequence of soil layer dicts.")
+
     gamma_w = 9.81  # kN/m³
+    sorted_layers = sorted(layers, key=lambda lyr: lyr["depth_top"])
+    max_depth = sorted_layers[-1]["depth_bot"]
 
     def sigma_at_depth(z_bgl):
-        """Compute effective stress at depth z_bgl (m below ground level)."""
+        if z_bgl < 0:
+            raise ValueError(f"Depth below ground level must be non-negative, got {z_bgl}")
+        if z_bgl > max_depth:
+            raise ValueError(
+                f"Requested depth {z_bgl:.2f} m exceeds profile bottom {max_depth:.2f} m."
+            )
+
         sigma = 0.0
-        for lyr in layers:
-            if lyr["depth_top"] >= z_bgl:
+        for lyr in sorted_layers:
+            z_top = lyr["depth_top"]
+            if z_top >= z_bgl:
                 break
             z_bot = min(lyr["depth_bot"], z_bgl)
-            z_top = lyr["depth_top"]
-            dz = z_bot - z_top
-            mid = (z_top + z_bot) / 2.0
-            if mid < wt_design_bgl:
-                gamma = lyr.get("gamma_moist", 18.0)
-                sigma += gamma * dz
-            else:
-                gamma_sat = lyr.get("gamma_sat", 20.0)
-                sigma += (gamma_sat - gamma_w) * dz
-                # add pore pressure reduction for portion above WT inside layer
-                if z_top < wt_design_bgl < z_bot:
-                    # already computed as moist above; correct the sub-WT part
-                    dz_above = wt_design_bgl - z_top
-                    dz_below = z_bot - wt_design_bgl
-                    # redo: remove what we added for submerged portion above, recalc
-                    sigma = sigma  # already incremented correctly per mid approach
+            if z_bot <= z_top:
+                continue
+
+            # Exact split of the layer segment [z_top, z_bot] at the water table
+            z_split = min(max(wt_design_bgl, z_top), z_bot)
+            dz_above = z_split - z_top
+            dz_below = z_bot - z_split
+
+            gamma_moist = lyr.get("gamma_moist", 18.0)
+            gamma_sat = lyr.get("gamma_sat", 20.0)
+            sigma += gamma_moist * dz_above + (gamma_sat - gamma_w) * dz_below
+
         return sigma
 
-    result = np.array([sigma_at_depth(z + Df) for z in z_array])
-    return result
+    z_arr = np.asarray(z_array, dtype=float)
+    return np.array([sigma_at_depth(float(z) + Df) for z in z_arr], dtype=float)

@@ -14,10 +14,11 @@ from utils.bearing_capacity import (
     bearing_capacity_factors,
     net_ultimate_bearing_capacity,
     net_safe_bearing_capacity,
+    effective_overburden_pressure,
     water_table_factor,
     effective_area,
     required_footing_size,
-    GAMMA_W,
+    STRIP_LENGTH_EQUIV,
 )
 
 # ---------------------------------------------------------------------------
@@ -74,7 +75,7 @@ with st.sidebar:
         B_sidebar, L_sidebar = B_input, L_input
     elif footing_shape == "strip":
         B_sidebar = st.number_input("Width B (m)", min_value=0.3, max_value=10.0, value=1.0, step=0.1)
-        L_sidebar = 1e6
+        L_sidebar = STRIP_LENGTH_EQUIV
     else:
         B_sidebar = st.number_input(
             "Width / Diameter B (m)", min_value=0.3, max_value=20.0, value=1.5, step=0.1
@@ -122,6 +123,7 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 st.header("🪨 Section B — Soil Parameters at Founding Level")
 
+layers_profile = st.session_state.get("layers", [])
 detected_layer = get_layer_at_depth(Df)
 
 if detected_layer is None:
@@ -131,13 +133,13 @@ if detected_layer is None:
 with st.expander("📋 Detected layer at Df = {:.2f} m".format(Df), expanded=True):
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Symbol", detected_layer.get("symbol", "—"))
-    col2.metric("c′ (kPa)", f"{detected_layer.get('c_prime', 0.0):.1f}")
-    col3.metric("φ′ (°)", f"{detected_layer.get('phi_prime', 0.0):.1f}")
-    col4.metric("cu (kPa)", f"{detected_layer.get('cu', 0.0):.1f}")
+    col2.metric("c′ (kPa)", f"{detected_layer['c_prime']:.1f}")
+    col3.metric("φ′ (°)", f"{detected_layer['phi_prime']:.1f}")
+    col4.metric("cu (kPa)", f"{detected_layer['cu']:.1f}")
 
     col5, col6, col7 = st.columns(3)
-    col5.metric("γ_moist (kN/m³)", f"{detected_layer.get('gamma_moist', 18.0):.1f}")
-    col6.metric("γ_sat (kN/m³)", f"{detected_layer.get('gamma_sat', 20.0):.1f}")
+    col5.metric("γ_moist (kN/m³)", f"{detected_layer['gamma_moist']:.1f}")
+    col6.metric("γ_sat (kN/m³)", f"{detected_layer['gamma_sat']:.1f}")
     col7.metric("Is undrained?", "Yes" if detected_layer.get("is_undrained", False) else "No")
 
 override = st.checkbox("🔧 Override soil parameters manually")
@@ -147,36 +149,37 @@ if override:
     oc1, oc2, oc3 = st.columns(3)
     with oc1:
         c_prime = st.number_input("c′ (kPa)", min_value=0.0, max_value=500.0,
-                                   value=float(detected_layer.get("c_prime", 0.0)), step=0.5)
+                                   value=float(detected_layer["c_prime"]), step=0.5)
         phi_prime = st.number_input("φ′ (°)", min_value=0.0, max_value=50.0,
-                                     value=float(detected_layer.get("phi_prime", 30.0)), step=0.5)
+                                     value=float(detected_layer["phi_prime"]), step=0.5)
     with oc2:
         cu_val = st.number_input("cu (kPa)", min_value=0.0, max_value=500.0,
-                                  value=float(detected_layer.get("cu", 0.0)), step=0.5)
+                                  value=float(detected_layer["cu"]), step=0.5)
         is_undrained = st.checkbox("Use undrained (φ=0) analysis",
                                     value=bool(detected_layer.get("is_undrained", False)))
     with oc3:
         gamma_moist = st.number_input("γ_moist (kN/m³)", min_value=10.0, max_value=24.0,
-                                       value=float(detected_layer.get("gamma_moist", 18.0)), step=0.1)
+                                       value=float(detected_layer["gamma_moist"]), step=0.1)
         gamma_sat = st.number_input("γ_sat (kN/m³)", min_value=10.0, max_value=24.0,
-                                     value=float(detected_layer.get("gamma_sat", 20.0)), step=0.1)
+                                     value=float(detected_layer["gamma_sat"]), step=0.1)
 else:
-    c_prime     = float(detected_layer.get("c_prime", 0.0))
-    phi_prime   = float(detected_layer.get("phi_prime", 30.0))
-    cu_val      = float(detected_layer.get("cu", 0.0))
+    c_prime      = float(detected_layer["c_prime"])
+    phi_prime    = float(detected_layer["phi_prime"])
+    cu_val       = float(detected_layer["cu"])
     is_undrained = bool(detected_layer.get("is_undrained", False))
-    gamma_moist  = float(detected_layer.get("gamma_moist", 18.0))
-    gamma_sat    = float(detected_layer.get("gamma_sat", 20.0))
+    gamma_moist  = float(detected_layer["gamma_moist"])
+    gamma_sat    = float(detected_layer["gamma_sat"])
 
-# Effective overburden at founding level
-if wt_bgl >= Df:
-    q_eff_display = gamma_moist * Df
-    q_note = f"WT below footing base → q = γ_moist × Df = {gamma_moist:.1f} × {Df:.2f}"
-else:
-    q_eff_display = gamma_moist * wt_bgl + (gamma_sat - GAMMA_W) * (Df - wt_bgl)
-    q_note = (
-        f"WT above footing → q = γ_moist·{wt_bgl:.2f} + (γ_sat−γw)·{(Df - wt_bgl):.2f}"
-    )
+# Effective overburden at founding level (integrated across overburden layers when not overridden)
+active_layers = None if override else layers_profile
+q_eff_display, q_steps = effective_overburden_pressure(
+    layers=active_layers,
+    Df=Df,
+    wt_bgl=wt_bgl,
+    fallback_gamma_moist=gamma_moist,
+    fallback_gamma_sat=gamma_sat,
+)
+q_note = " | ".join(q_steps)
 
 st.info(f"**Effective overburden q at founding level:** {q_eff_display:.2f} kPa  \n_{q_note}_")
 
@@ -202,6 +205,7 @@ result = net_ultimate_bearing_capacity(
     alpha_deg=alpha_deg,
     is_undrained=is_undrained,
     cu=cu_val,
+    layers=active_layers,
 )
 
 qf   = result["qf"]
@@ -225,7 +229,7 @@ with st.expander("🔍 Intermediate Values (IS 6403:1981 Factors)", expanded=Fal
             "ic (incl., c-term)", "iq (incl., q-term)", "iγ (incl., γ-term)",
             "W′ (WT factor)",
             "q_eff (overburden)",
-            "γ_eff for Nγ term",
+            "γ·W′ for Nγ term",
             "B (width)", "L (length)",
             "c used", "φ used",
         ],
@@ -290,6 +294,7 @@ for col_type, P in [("Corner", P_corner), ("Edge", P_edge), ("Interior", P_inter
         alpha_deg=alpha_deg,
         is_undrained=is_undrained,
         cu=cu_val,
+        layers=active_layers,
     )
     actual_fos = sz["actual_FOS"]
     fos_ok = actual_fos >= FOS
@@ -336,9 +341,10 @@ for wt_i in wt_range:
     res_i = net_ultimate_bearing_capacity(
         c_prime=c_prime, phi_prime_deg=phi_prime,
         gamma_moist=gamma_moist, gamma_sat=gamma_sat,
-        Df=Df, B=B_calc, L=L_calc, wt_bgl=wt_i,
+        Df=Df, B=B_calc, L=L_calc, wt_bgl=float(wt_i),
         footing_shape=footing_shape, failure_mode=failure_mode,
         alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu_val,
+        layers=active_layers,
     )
     qnu_values.append(res_i["qnu"])
 
@@ -423,6 +429,7 @@ else:
                 Df=Df, B=B_eff, L=L_eff, wt_bgl=wt_bgl,
                 footing_shape="rectangular", failure_mode=failure_mode,
                 alpha_deg=alpha_deg, is_undrained=is_undrained, cu=cu_val,
+                layers=active_layers,
             )
             qnu_eff  = res_eff["qnu"]
             qns_eff  = net_safe_bearing_capacity(qnu_eff, FOS)

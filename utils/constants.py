@@ -19,6 +19,7 @@ DEFAULT_LAYER = {
     "phi_prime": 30.0,     # degrees — drained friction angle φ'
     "cu": 0.0,             # kPa  — undrained shear strength (0 if N/A)
     "is_undrained": False, # True for UU analysis of clay
+    "Es_kPa": None,        # Elastic modulus Es in kPa (None if not entered; optional SPT estimate used)
     "N_field": None,       # Observed SPT N (None if not tested)
     "N_corrected": None,   # IS 2131 corrected N (filled by P2)
     # Consolidation params (clay layers only; None if not applicable)

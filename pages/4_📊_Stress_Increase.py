@@ -19,6 +19,7 @@ from utils.constants import init_session_state
 from utils.stress_increase import (
     stress_increase_centre,
     boussinesq_corner,
+    stress_increase_point,
     stress_increase_2to1,
     stress_profile,
     influence_depth,
@@ -96,11 +97,23 @@ for m in methods_to_plot:
     _, ds = stress_profile(q_net, B, L, z_max, method=m, n_points=n_pts)
     traces_data[m] = ds
 
-eff_stress = effective_stress_profile(layers, wt, z_arr, Df=Df)
+profile_bottom = max(float(lyr["depth_bot"]) for lyr in layers)
+valid_eff_stress = (z_arr + Df) <= profile_bottom
+eff_stress = np.full(z_arr.shape, np.nan, dtype=float)
+if np.any(valid_eff_stress):
+    eff_stress[valid_eff_stress] = effective_stress_profile(
+        layers, wt, z_arr[valid_eff_stress], Df=Df
+    )
+if not np.all(valid_eff_stress):
+    st.info(
+        f"The soil profile ends at {profile_bottom:.2f} m below ground. "
+        "Stress increase is plotted to the selected depth; effective stress "
+        "is shown only within the entered profile."
+    )
 
 # Influence depth (Boussinesq centre)
 z_inf = influence_depth(q_net, B, L, threshold=0.1,
-                        method="boussinesq_centre", n_points=500)
+                        method="boussinesq_centre")
 
 # ── Figure ─────────────────────────────────────────────────────────────────
 colour_map = {
@@ -179,7 +192,11 @@ for z in z_table:
     ds_centre = stress_increase_centre(q_net, B, L, z)
     ds_corner = boussinesq_corner(q_net, B, L, z)
     ds_21 = stress_increase_2to1(q_net, B, L, z)
-    sv0 = effective_stress_profile(layers, wt, np.array([z]), Df=Df)[0]
+    sv0 = (
+        effective_stress_profile(layers, wt, np.array([z]), Df=Df)[0]
+        if z + Df <= profile_bottom
+        else np.nan
+    )
     rows.append({
         "Depth below footing  z (m)": round(float(z), 2),
         "Δσz — Centre (kPa)": round(float(ds_centre), 2),
@@ -195,8 +212,9 @@ st.dataframe(df_table, use_container_width=True, hide_index=True)
 # ── Superposition tool ─────────────────────────────────────────────────────
 with st.expander("🔀 Superposition Tool — multiple loaded areas"):
     st.write(
-        "Add several footings (each with its own B, L, q, and horizontal offsets "
-        "from a reference point) and sum their stress contributions at any depth."
+        "Add several footings (each with its own B, L, q, and plan offsets). "
+        "The offsets locate each footing's near corner from the observation point "
+        "at (0, 0); the tool sums the stress at that point."
     )
     if "superpos_areas" not in st.session_state:
         st.session_state.superpos_areas = [
@@ -213,9 +231,9 @@ with st.expander("🔀 Superposition Tool — multiple loaded areas"):
                                     min_value=0.1, key=f"sp_L_{idx}")
         area["q"] = c3.number_input(f"q{idx+1} (kPa)", value=area["q"],
                                     min_value=0.1, key=f"sp_q_{idx}")
-        area["xoff"] = c4.number_input(f"x-offset{idx+1} (m)", value=area["xoff"],
+        area["xoff"] = c4.number_input(f"Near-corner x{idx+1} (m)", value=area["xoff"],
                                        key=f"sp_xoff_{idx}")
-        area["yoff"] = c5.number_input(f"y-offset{idx+1} (m)", value=area["yoff"],
+        area["yoff"] = c5.number_input(f"Near-corner y{idx+1} (m)", value=area["yoff"],
                                        key=f"sp_yoff_{idx}")
         if c6.button("✕", key=f"sp_del_{idx}"):
             to_delete = idx
@@ -233,8 +251,11 @@ with st.expander("🔀 Superposition Tool — multiple loaded areas"):
     ds_total = np.zeros_like(z_sp)
     for area in sp_areas:
         for i, z in enumerate(z_sp):
-            # treat each footing as contributing at its own corners relative to point
-            ds_total[i] += stress_increase_centre(area["q"], area["B"], area["L"], z)
+            # Offsets locate the near corner relative to observation point (0, 0).
+            ds_total[i] += stress_increase_point(
+                area["q"], area["B"], area["L"],
+                -area["xoff"], -area["yoff"], z,
+            )
 
     fig_sp = go.Figure()
     fig_sp.add_trace(go.Scatter(
@@ -253,30 +274,33 @@ with st.expander("🔀 Superposition Tool — multiple loaded areas"):
 
 # ── Theory box ─────────────────────────────────────────────────────────────
 with st.expander("📖 Theory — Boussinesq Stress Increase"):
-    st.markdown(r"""
-### Boussinesq Rectangular Load (IS 8009:1976)
+    st.markdown("### Boussinesq Rectangular Load (IS 8009:1976)")
+    st.markdown(
+        "For a uniformly loaded rectangle $B \\times L$ with net pressure $q$ (kPa), "
+        "the vertical stress increase at depth $z$ below the **corner** is:"
+    )
+    st.latex(r"\Delta\sigma_z = q \, I_\sigma")
+    st.latex(
+        r"I_\sigma = \frac{1}{4\pi}\left[ "
+        r"\frac{2 m_1 n_1 \sqrt{1+m_1^2+n_1^2}}{1+m_1^2+n_1^2+m_1^2 n_1^2}"
+        r"\cdot\frac{2+m_1^2+n_1^2}{1+m_1^2+n_1^2} "
+        r"+ \tan^{-1}\!\left(\frac{2 m_1 n_1 \sqrt{1+m_1^2+n_1^2}}"
+        r"{1+m_1^2+n_1^2-m_1^2 n_1^2}\right) \right]"
+    )
+    st.markdown("where $m_1 = B/z$ and $n_1 = L/z$ *(Das 2016, Eq. 5.37)*.")
+    st.caption(
+        "Note: when $m_1^2 n_1^2 > 1 + m_1^2 + n_1^2$ the arctan argument goes negative; "
+        "add $\\pi$ to the arctan term (use `atan2` in code)."
+    )
 
-For a uniformly loaded rectangle $B \times L$ with net pressure $q$ (kPa),
-the vertical stress increase at depth $z$ below the **corner** is:
+    st.markdown("**Below the centre:** superpose 4 corner rectangles of size $(B/2 \\times L/2)$:")
+    st.latex(r"\Delta\sigma_{z,\text{centre}} = 4\,\Delta\sigma_{z,\text{corner}}(B/2,\ L/2,\ z)")
 
-$$\Delta\sigma_z = q \cdot I_\sigma$$
+    st.divider()
 
-$$I_\sigma = \frac{1}{4\pi}\left[
-  \frac{2m_1 n_1 \sqrt{1+m_1^2+n_1^2}}{1+m_1^2+n_1^2+m_1^2 n_1^2}
-  \cdot \frac{2+m_1^2+n_1^2}{1+m_1^2+n_1^2}
-  + \arctan\!\left(\frac{2m_1 n_1\sqrt{1+m_1^2+n_1^2}}{1+m_1^2+n_1^2-m_1^2 n_1^2}\right)
-\right]$$
-
-where $m_1 = B/z$, $n_1 = L/z$.   *(Das 2016, Eq. 5.37)*
-
-**Below the centre:** apply superposition of 4 corner rectangles $(B/2 \times L/2)$:
-$$\Delta\sigma_{z,\text{centre}} = 4 \times \Delta\sigma_{z,\text{corner}}(B/2,\, L/2,\, z)$$
-
----
-
-### 2:1 Method (IS 8009:1976)
-
-$$\Delta\sigma_z = \frac{q \cdot B \cdot L}{(B+z)(L+z)}$$
-
-Simpler but less accurate; tends to overestimate at shallow depths, underestimate at large depths.
-    """)
+    st.markdown("### 2:1 Method")
+    st.latex(r"\Delta\sigma_z = \frac{q\,B\,L}{(B+z)(L+z)}")
+    st.markdown(
+        "Simple approximate method that assumes the load spreads at 2 vertical : 1 horizontal. "
+        "It is less accurate than the Boussinesq solution, so check it against that result."
+    )
