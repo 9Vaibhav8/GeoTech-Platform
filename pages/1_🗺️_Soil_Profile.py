@@ -268,6 +268,43 @@ with col_editor:
             else:
                 st.session_state.layers[i]["N_field"] = None
 
+            st.markdown("**Stiffness / Elastic Modulus (Es)**")
+            es_val = layer.get("Es_kPa")
+            use_custom_es = st.checkbox(
+                "Specify measured / design Es (MPa)",
+                value=(es_val is not None and es_val > 0),
+                key=f"layer_{i}_has_es",
+                help="Overrides SPT correlation in P5 immediate settlement. Leave unchecked to estimate Es from SPT N.",
+            )
+            if use_custom_es:
+                es_mpa_default = (float(es_val) / 1000.0) if (es_val is not None and es_val > 0) else 15.0
+                es_mpa = st.number_input(
+                    "Es (MPa)",
+                    value=es_mpa_default,
+                    min_value=0.1,
+                    max_value=5000.0,
+                    step=1.0,
+                    format="%.1f",
+                    key=f"layer_{i}_Es_MPa",
+                )
+                st.session_state.layers[i]["Es_kPa"] = es_mpa * 1000.0
+            else:
+                st.session_state.layers[i]["Es_kPa"] = None
+                if not layer.get("is_clay", False):
+                    n_preview = layer.get("N_corrected") or layer.get("N_field")
+                    if n_preview:
+                        is_gravel = layer["symbol"] in ("GW", "GP", "GM", "GC")
+                        est_kpa = (1200.0 * (n_preview + 6)) if is_gravel else (500.0 * (n_preview + 15))
+                        st.caption(
+                            f"ℹ️ Optional SPT correlation will be used in P5: "
+                            f"**Es ≈ {est_kpa / 1000.0:.2f} MPa** ({est_kpa:.0f} kPa) from N = {n_preview}."
+                        )
+                    else:
+                        st.warning(
+                            "⚠️ Neither Es nor SPT N is entered for this layer. "
+                            "P5 immediate settlement will skip this layer unless Es or SPT N is provided."
+                        )
+
             if st.button(f"🗑️ Delete layer {i + 1}", key=f"layer_{i}_delete"):
                 to_delete = i
 
@@ -398,6 +435,16 @@ st.subheader("📄 Layer Summary")
 if st.session_state.layers:
     rows = []
     for i, l in enumerate(st.session_state.layers):
+        es_kpa = l.get("Es_kPa")
+        if es_kpa is not None and es_kpa > 0:
+            es_display = f"{es_kpa / 1000.0:.1f} MPa (entered)"
+        elif not l.get("is_clay", False) and (l.get("N_corrected") or l.get("N_field")):
+            n_val = l.get("N_corrected") or l.get("N_field")
+            est = (1200.0 * (n_val + 6)) if l["symbol"] in ("GW", "GP", "GM", "GC") else (500.0 * (n_val + 15))
+            es_display = f"{est / 1000.0:.1f} MPa (est. SPT)"
+        else:
+            es_display = "—"
+
         rows.append({
             "Layer": f"{i + 1} — {l['name']}",
             "Symbol": l["symbol"],
@@ -406,6 +453,7 @@ if st.session_state.layers:
             "γ_sat (kN/m³)": round(l["gamma_sat"], 1),
             "c′ (kPa)": round(l["c_prime"], 1),
             "φ′ (°)": round(l["phi_prime"], 1),
+            "Es": es_display,
             "N_field": l["N_field"] if l["N_field"] is not None else "—",
             "Cc": round(l["Cc"], 3) if l["Cc"] is not None else "—",
             "cv (m²/s)": f"{l['cv_m2s']:.2e}" if l["cv_m2s"] is not None else "—",
