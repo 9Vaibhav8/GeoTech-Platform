@@ -1,0 +1,9 @@
+# GeoForge assignment demo — installation
+
+Copy Home.py, README.md, pages/ and utils/ into the existing repository, replacing matching files. Keep requirements.txt and all other project files. This bundle contains the previously rectified five pages and six utilities, plus the new demo loader. It does not include a new dependency list. Use the existing environment (`pip install -r requirements.txt`, `streamlit run Home.py`).
+
+The demo is optional and requires confirmation. Select group number (default 0 for original unfactored loads; enter 3 if applicable). Reloading replaces analysis inputs. New Project clears the active layers and demo snapshots. Page-specific edits are not all automatically transferred: P5 uses snapshots and P4 requires net pressure/load. Read the assumptions on Home before interpreting results.
+
+Source: CE 402 assignment dated 05.11.2026, pp. 1–6. Values omitted in the assignment are not represented as measured data. All demo calculations are illustrative and are not engineering approval. The original equations have not been independently re-certified in this update.
+
+Validation: Python compilation and 59 assertions with the actual numerical utilities (Streamlit replaced by a minimal module stub only for importing constants). The actual browser UI has not been run, because Streamlit is not installed in the test environment.
