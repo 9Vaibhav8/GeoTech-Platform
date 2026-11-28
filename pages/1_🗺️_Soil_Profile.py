@@ -1,24 +1,57 @@
 """
 pages/1_🗺️_Soil_Profile.py
 P1 — Soil Profile Input & Visualization
-CE 402 Geotechnical Engineering Platform — IIT Mandi
+GeoForge — Geotechnical Analysis & Foundation Design
 """
 
 import copy
+import math
+from uuid import uuid4
 import streamlit as st
 import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import pandas as pd
 
-matplotlib.use("Agg")
-
+from utils.demo_data import demo_notice
 from utils.constants import init_session_state, SOIL_SYMBOLS, DEFAULT_LAYER
+from utils.bearing_capacity import GAMMA_W, validate_profile
 
 st.set_page_config(page_title="P1 — Soil Profile", layout="wide")
 
 # ── Session state ────────────────────────────────────────────────────────────
 init_session_state()
+demo_notice(st)
+
+# Persistent layer identities prevent widget values from moving to the wrong
+# layer when its position changes. They are metadata, not engineering inputs.
+seen_ids = set()
+for layer in st.session_state.layers:
+    uid = layer.get("_ui_id")
+    if not uid or uid in seen_ids:
+        uid = uuid4().hex
+        layer["_ui_id"] = uid
+    seen_ids.add(uid)
+
+
+def preview_es(layer):
+    """Existing SPT–Es estimate, for display only; verify source with P5.
+
+    Correlation coefficients retained from original P1. A source was not
+    supplied; this is not a verified IS-code relationship.
+    """
+    if layer.get("is_clay") or layer.get("N_refusal"):
+        return None, None
+    n = layer.get("N_corrected")
+    if n is None:
+        n = layer.get("N_field")
+    if n is None or not math.isfinite(float(n)) or float(n) <= 0:
+        return None, None
+    n = float(n)
+    gravel = layer["symbol"] in ("GW", "GP", "GM", "GC")
+    return (1200.0 * (n + 6) if gravel else 500.0 * (n + 15)), n
+
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -54,6 +87,15 @@ with st.sidebar:
         help="Use highest seasonal WT for bearing capacity",
     )
     st.caption("ℹ️ Use highest seasonal WT for bearing capacity design.")
+    st.session_state.foundation_depth = st.number_input(
+        "Foundation depth for profile preview (m bgl)",
+        min_value=0.0,
+        value=float(st.session_state.get("foundation_depth", 1.5)),
+        step=0.1,
+        format="%.2f",
+        key="p1_foundation_depth",
+        help="Editable preview value; use the same Df in footing modules if applicable.",
+    )
 
 # ── Page title ───────────────────────────────────────────────────────────────
 st.title("🗺️ P1 — Soil Profile")
@@ -73,10 +115,11 @@ with col_editor:
     st.subheader("📋 Layer Editor")
 
     if st.button("➕ Add Layer", key="btn_add_layer"):
-        last = st.session_state.layers[-1] if st.session_state.layers else DEFAULT_LAYER
+        top = max((float(l["depth_bot"]) for l in st.session_state.layers), default=0.0)
         new = copy.deepcopy(DEFAULT_LAYER)
-        new["depth_top"] = last["depth_bot"]
-        new["depth_bot"] = last["depth_bot"] + 1.5
+        new["_ui_id"] = uuid4().hex
+        new["depth_top"] = top
+        new["depth_bot"] = top + 1.5  # editable initial thickness, not a calculation limit
         new["name"] = f"Layer {len(st.session_state.layers) + 1}"
         st.session_state.layers.append(new)
         sort_layers()
@@ -86,6 +129,7 @@ with col_editor:
     to_delete = None
 
     for i, layer in enumerate(st.session_state.layers):
+        uid = layer["_ui_id"]
         label = (
             f"**Layer {i + 1}** — {layer['name']} ({layer['symbol']})  "
             f"| {layer['depth_top']:.1f}–{layer['depth_bot']:.1f} m"
@@ -97,17 +141,19 @@ with col_editor:
                 st.session_state.layers[i]["depth_top"] = st.number_input(
                     "Depth top (m bgl)",
                     value=float(layer["depth_top"]),
+                    min_value=0.0,
                     step=0.1,
                     format="%.2f",
-                    key=f"layer_{i}_depth_top",
+                    key=f"p1_layer_{uid}_depth_top",
                 )
             with c2:
                 st.session_state.layers[i]["depth_bot"] = st.number_input(
                     "Depth bottom (m bgl)",
                     value=float(layer["depth_bot"]),
+                    min_value=0.0,
                     step=0.1,
                     format="%.2f",
-                    key=f"layer_{i}_depth_bot",
+                    key=f"p1_layer_{uid}_depth_bot",
                 )
 
             c3, c4 = st.columns(2)
@@ -115,7 +161,7 @@ with col_editor:
                 st.session_state.layers[i]["name"] = st.text_input(
                     "Layer name",
                     value=layer["name"],
-                    key=f"layer_{i}_name",
+                    key=f"p1_layer_{uid}_name",
                 )
             with c4:
                 sym_idx = SOIL_SYMBOLS.index(layer["symbol"]) if layer["symbol"] in SOIL_SYMBOLS else 0
@@ -123,7 +169,7 @@ with col_editor:
                     "Soil symbol (IS 1498)",
                     options=SOIL_SYMBOLS,
                     index=sym_idx,
-                    key=f"layer_{i}_symbol",
+                    key=f"p1_layer_{uid}_symbol",
                 )
 
             st.markdown("**Unit weights**")
@@ -132,21 +178,19 @@ with col_editor:
                 st.session_state.layers[i]["gamma_moist"] = st.number_input(
                     "γ_moist (kN/m³)",
                     value=float(layer["gamma_moist"]),
-                    min_value=10.0,
-                    max_value=25.0,
+                    min_value=0.1,
                     step=0.1,
                     format="%.1f",
-                    key=f"layer_{i}_gamma_moist",
+                    key=f"p1_layer_{uid}_gamma_moist",
                 )
             with cg2:
                 st.session_state.layers[i]["gamma_sat"] = st.number_input(
                     "γ_sat (kN/m³)",
                     value=float(layer["gamma_sat"]),
-                    min_value=10.0,
-                    max_value=25.0,
+                    min_value=0.1,
                     step=0.1,
                     format="%.1f",
-                    key=f"layer_{i}_gamma_sat",
+                    key=f"p1_layer_{uid}_gamma_sat",
                 )
 
             st.markdown("**Drained strength parameters**")
@@ -158,24 +202,24 @@ with col_editor:
                     min_value=0.0,
                     step=0.5,
                     format="%.1f",
-                    key=f"layer_{i}_c_prime",
+                    key=f"p1_layer_{uid}_c_prime",
                 )
             with cd2:
                 st.session_state.layers[i]["phi_prime"] = st.number_input(
                     "φ′ (degrees)",
                     value=float(layer["phi_prime"]),
                     min_value=0.0,
-                    max_value=50.0,
+                    max_value=89.9,
                     step=0.5,
                     format="%.1f",
-                    key=f"layer_{i}_phi_prime",
+                    key=f"p1_layer_{uid}_phi_prime",
                 )
 
             st.markdown("**Undrained shear strength**")
             st.session_state.layers[i]["is_undrained"] = st.checkbox(
                 "Use undrained (cu) — UU analysis",
                 value=bool(layer["is_undrained"]),
-                key=f"layer_{i}_is_undrained",
+                key=f"p1_layer_{uid}_is_undrained",
             )
             if st.session_state.layers[i]["is_undrained"]:
                 st.session_state.layers[i]["cu"] = st.number_input(
@@ -184,16 +228,17 @@ with col_editor:
                     min_value=0.0,
                     step=1.0,
                     format="%.1f",
-                    key=f"layer_{i}_cu",
+                    key=f"p1_layer_{uid}_cu",
                 )
 
             st.markdown("**Consolidation (clay)**")
             st.session_state.layers[i]["is_clay"] = st.checkbox(
                 "Clay (consolidation settlement applies)",
                 value=bool(layer["is_clay"]),
-                key=f"layer_{i}_is_clay",
+                key=f"p1_layer_{uid}_is_clay",
             )
             if st.session_state.layers[i]["is_clay"]:
+                st.caption("Initial values are editable assumptions when no data are present; verify each against lab/design data before use.")
                 cc1, cc2, cc3 = st.columns(3)
                 with cc1:
                     cc_val = layer["Cc"] if layer["Cc"] is not None else 0.3
@@ -203,7 +248,7 @@ with col_editor:
                         min_value=0.0,
                         step=0.01,
                         format="%.3f",
-                        key=f"layer_{i}_Cc",
+                        key=f"p1_layer_{uid}_Cc",
                     )
                 with cc2:
                     cr_val = layer["Cr"] if layer["Cr"] is not None else 0.05
@@ -213,7 +258,7 @@ with col_editor:
                         min_value=0.0,
                         step=0.01,
                         format="%.3f",
-                        key=f"layer_{i}_Cr",
+                        key=f"p1_layer_{uid}_Cr",
                     )
                 with cc3:
                     e0_val = layer["e0"] if layer["e0"] is not None else 0.9
@@ -223,7 +268,7 @@ with col_editor:
                         min_value=0.0,
                         step=0.01,
                         format="%.3f",
-                        key=f"layer_{i}_e0",
+                        key=f"p1_layer_{uid}_e0",
                     )
                 cp1, cp2 = st.columns(2)
                 with cp1:
@@ -234,7 +279,7 @@ with col_editor:
                         min_value=0.0,
                         step=1.0,
                         format="%.1f",
-                        key=f"layer_{i}_Pc_kPa",
+                        key=f"p1_layer_{uid}_Pc_kPa",
                     )
                 with cp2:
                     cv_val = layer["cv_m2s"] if layer["cv_m2s"] is not None else 1e-8
@@ -244,36 +289,54 @@ with col_editor:
                         min_value=0.0,
                         step=0.1,
                         format="%.2f",
-                        key=f"layer_{i}_cv_m2s",
+                        key=f"p1_layer_{uid}_cv_m2s",
                     )
                     st.session_state.layers[i]["cv_m2s"] = cv_input * 1e-8
 
             st.markdown("**SPT**")
-            n_field_val = layer["N_field"]
-            use_spt = st.checkbox(
-                "Has SPT N value",
-                value=(n_field_val is not None),
-                key=f"layer_{i}_has_spt",
+            n_field_val = layer.get("N_field")
+            old_refusal = bool(layer.get("N_refusal"))
+            refusal = st.checkbox(
+                "SPT refusal / incomplete penetration (not an exact N)",
+                value=old_refusal,
+                key=f"p1_layer_{uid}_refusal",
             )
-            if use_spt:
-                n_default = int(n_field_val) if n_field_val is not None else 10
-                st.session_state.layers[i]["N_field"] = st.number_input(
-                    "N_field (observed SPT N)",
-                    value=n_default,
-                    min_value=1,
-                    max_value=100,
-                    step=1,
-                    key=f"layer_{i}_N_field",
+            layer["N_refusal"] = refusal
+            if refusal:
+                layer["N_refusal_note"] = st.text_input(
+                    "Reported refusal (blows / penetration)",
+                    value=layer.get("N_refusal_note", ""),
+                    key=f"p1_layer_{uid}_refusal_note",
                 )
+                layer["N_field"] = None
+                layer["N_corrected"] = None
+                st.caption("Refusal is retained as a note, not substituted as an exact N. Enter a justified Es if needed.")
             else:
-                st.session_state.layers[i]["N_field"] = None
+                use_spt = st.checkbox(
+                    "Has SPT N value",
+                    value=(n_field_val is not None),
+                    key=f"p1_layer_{uid}_has_spt",
+                )
+                if use_spt:
+                    layer["N_field"] = st.number_input(
+                        "N_field (observed SPT N)",
+                        value=int(n_field_val) if n_field_val is not None else 10,
+                        min_value=0,
+                        step=1,
+                        key=f"p1_layer_{uid}_N_field",
+                        help="Enter an exact observed count, not an estimated refusal equivalent.",
+                    )
+                else:
+                    layer["N_field"] = None
+                if layer["N_field"] != n_field_val or old_refusal:
+                    layer["N_corrected"] = None
 
             st.markdown("**Stiffness / Elastic Modulus (Es)**")
             es_val = layer.get("Es_kPa")
             use_custom_es = st.checkbox(
                 "Specify measured / design Es (MPa)",
                 value=(es_val is not None and es_val > 0),
-                key=f"layer_{i}_has_es",
+                key=f"p1_layer_{uid}_has_es",
                 help="Overrides SPT correlation in P5 immediate settlement. Leave unchecked to estimate Es from SPT N.",
             )
             if use_custom_es:
@@ -281,31 +344,28 @@ with col_editor:
                 es_mpa = st.number_input(
                     "Es (MPa)",
                     value=es_mpa_default,
-                    min_value=0.1,
-                    max_value=5000.0,
-                    step=1.0,
-                    format="%.1f",
-                    key=f"layer_{i}_Es_MPa",
+                    min_value=0.000001,
+                    step=0.1,
+                    format="%.6f",
+                    key=f"p1_layer_{uid}_Es_MPa",
                 )
                 st.session_state.layers[i]["Es_kPa"] = es_mpa * 1000.0
             else:
                 st.session_state.layers[i]["Es_kPa"] = None
                 if not layer.get("is_clay", False):
-                    n_preview = layer.get("N_corrected") or layer.get("N_field")
-                    if n_preview:
-                        is_gravel = layer["symbol"] in ("GW", "GP", "GM", "GC")
-                        est_kpa = (1200.0 * (n_preview + 6)) if is_gravel else (500.0 * (n_preview + 15))
+                    est_kpa, n_preview = preview_es(layer)
+                    if est_kpa is not None:
                         st.caption(
-                            f"ℹ️ Optional SPT correlation will be used in P5: "
+                            f"ℹ️ Existing SPT correlation preview (source and P5 consistency need verification): "
                             f"**Es ≈ {est_kpa / 1000.0:.2f} MPa** ({est_kpa:.0f} kPa) from N = {n_preview}."
                         )
                     else:
                         st.warning(
-                            "⚠️ Neither Es nor SPT N is entered for this layer. "
-                            "P5 immediate settlement will skip this layer unless Es or SPT N is provided."
+                            "⚠️ No usable positive SPT N or entered Es for this layer. "
+                            "Provide a justified Es before immediate-settlement calculations."
                         )
 
-            if st.button(f"🗑️ Delete layer {i + 1}", key=f"layer_{i}_delete"):
+            if st.button(f"🗑️ Delete layer {i + 1}", key=f"p1_layer_{uid}_delete"):
                 to_delete = i
 
     # Perform deletion outside the loop
@@ -316,6 +376,34 @@ with col_editor:
 
     sort_layers()
 
+    # Keep the editor available so users can repair incomplete profiles.
+    errors = []
+    try:
+        validate_profile(st.session_state.layers)
+    except ValueError as exc:
+        errors.append(str(exc))
+    for i, layer in enumerate(st.session_state.layers, 1):
+        moist, sat = layer["gamma_moist"], layer["gamma_sat"]
+        if not (math.isfinite(moist) and math.isfinite(sat) and moist > 0 and sat > GAMMA_W and sat >= moist):
+            errors.append(f"Layer {i}: require γ_moist > 0, γ_sat > γ_w and γ_sat ≥ γ_moist.")
+        if layer.get("is_clay"):
+            for name in ("Cc", "Cr", "e0", "Pc_kPa", "cv_m2s"):
+                value = layer.get(name)
+                if value is None or not math.isfinite(float(value)) or value < 0:
+                    errors.append(f"Layer {i}: {name} must be finite and nonnegative.")
+            if layer.get("cv_m2s") == 0:
+                errors.append(f"Layer {i}: cv must be positive for time-settlement calculations.")
+    st.session_state.profile_errors = errors
+    st.session_state.profile_valid = not errors
+    if errors:
+        for error in errors:
+            st.error(error)
+        st.warning("Correct the profile before using it for calculations. Other pages must also check profile_valid or validate their inputs.")
+    else:
+        st.success("Soil profile geometry and basic unit-weight checks passed.")
+        if st.session_state.foundation_depth > st.session_state.layers[-1]["depth_bot"]:
+            st.warning("Preview foundation depth is below the defined profile.")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RIGHT COLUMN — Profile Visualization
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -325,7 +413,7 @@ with col_viz:
     layers = st.session_state.layers
     wt_meas = st.session_state.wt_measured_bgl
     wt_des = st.session_state.wt_design_bgl
-    DF = 1.5  # foundation depth
+    DF = st.session_state.foundation_depth
 
     # Hatching patterns by symbol
     HATCH_MAP = {
@@ -362,12 +450,12 @@ with col_viz:
         "Fill": "#d3d3d3",
     }
 
-    if layers:
+    if layers and st.session_state.profile_valid:
         max_depth = max(l["depth_bot"] for l in layers)
-        fig, ax = plt.subplots(figsize=(4.5, max(6, max_depth * 0.6)))
+        fig, ax = plt.subplots(figsize=(4.5, min(18, max(6, max_depth * 0.6))))
         ax.set_xlim(0, 1)
         ax.set_ylim(max_depth + 0.5, -0.3)  # inverted y-axis (depth increases down)
-        ax.set_yticks([l["depth_top"] for l in layers] + [layers[-1]["depth_bot"]])
+        ax.set_yticks(sorted({l["depth_top"] for l in layers} | {l["depth_bot"] for l in layers}))
         ax.set_ylabel("Depth (m bgl)", fontsize=10)
         ax.set_xticks([])
         ax.set_title(
@@ -418,11 +506,15 @@ with col_viz:
             ax.text(0.97, DF + 0.1, f"Df = {DF} m", ha="right", va="top",
                     color="red", fontsize=7, fontweight="bold")
 
-        ax.legend(loc="lower right", fontsize=7, framealpha=0.8)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="lower right", fontsize=7, framealpha=0.8)
         ax.grid(axis="y", linestyle=":", linewidth=0.4, color="#aaaaaa")
         fig.tight_layout()
         st.pyplot(fig)
         plt.close(fig)
+    elif layers:
+        st.info("Correct the profile validation errors to display the plot.")
     else:
         st.info("No layers defined. Add layers in the editor on the left.")
 
@@ -438,12 +530,9 @@ if st.session_state.layers:
         es_kpa = l.get("Es_kPa")
         if es_kpa is not None and es_kpa > 0:
             es_display = f"{es_kpa / 1000.0:.1f} MPa (entered)"
-        elif not l.get("is_clay", False) and (l.get("N_corrected") or l.get("N_field")):
-            n_val = l.get("N_corrected") or l.get("N_field")
-            est = (1200.0 * (n_val + 6)) if l["symbol"] in ("GW", "GP", "GM", "GC") else (500.0 * (n_val + 15))
-            es_display = f"{est / 1000.0:.1f} MPa (est. SPT)"
         else:
-            es_display = "—"
+            est, _ = preview_es(l)
+            es_display = f"{est / 1000.0:.1f} MPa (est. SPT)" if est is not None else "—"
 
         rows.append({
             "Layer": f"{i + 1} — {l['name']}",
@@ -454,9 +543,10 @@ if st.session_state.layers:
             "c′ (kPa)": round(l["c_prime"], 1),
             "φ′ (°)": round(l["phi_prime"], 1),
             "Es": es_display,
-            "N_field": l["N_field"] if l["N_field"] is not None else "—",
-            "Cc": round(l["Cc"], 3) if l["Cc"] is not None else "—",
-            "cv (m²/s)": f"{l['cv_m2s']:.2e}" if l["cv_m2s"] is not None else "—",
+            "N_field": "Refusal" if l.get("N_refusal") else (l["N_field"] if l["N_field"] is not None else "—"),
+            "SPT refusal note": l.get("N_refusal_note", "") if l.get("N_refusal") else "",
+            "Cc": round(l["Cc"], 3) if l.get("is_clay") and l["Cc"] is not None else "—",
+            "cv (m²/s)": f"{l['cv_m2s']:.2e}" if l.get("is_clay") and l["cv_m2s"] is not None else "—",
         })
     df_summary = pd.DataFrame(rows)
     st.dataframe(df_summary, use_container_width=True, hide_index=True)
