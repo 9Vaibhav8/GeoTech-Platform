@@ -11,7 +11,7 @@ Sources (list these in the report):
   [IS8009] IS 8009 (Part 1):1976 — Calculation of settlements of foundations
   [IS1904] IS 1904:1986 Table 1 — permissible settlement (see utils/is1904.py)
 
-All site values are INPUTS (sidebar / tables). Nothing is hard-coded to the BH-1/2/3 data.
+Initial inputs are illustrative. No assignment-specific calculation defaults.
 Units: kN, kPa, m, mm, years (cv in m²/s).
 """
 
@@ -21,16 +21,21 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
+from utils.demo_data import demo_notice, OEDOMETER
 from utils.constants import init_session_state
 from utils.settlement import (
     schmertmann_settlement,
     total_consolidation_settlement,
-    time_settlement_curve,
+    multilayer_time_settlement,
+    _effective_stress_at,
+    validate_profile,
 )
 from utils import Is1904 as IS
+import copy
 
 st.set_page_config(page_title="P5 – Settlement", page_icon="📐", layout="wide")
 init_session_state()
+demo_notice(st)
 
 SEC_PER_YEAR = 365.25 * 24 * 3600
 KGCM2_TO_KPA = 98.0665          # 1 kg/cm² = 98.0665 kPa  (oedometer units on lab sheets)
@@ -55,58 +60,88 @@ st.title("📐 P5 — Settlement Analysis")
 st.caption("Immediate (Schmertmann 1978) + Consolidation (Terzaghi 1943) · IS 8009:1976 · IS 1904:1986")
 
 # ═══════════════════════════ SIDEBAR (all inputs) ══════════════════════════
+demo = st.session_state.get("demo_project")
 with st.sidebar:
     st.header("⚙️ Global inputs")
-    g_group = st.number_input("Group number g (–)", value=3, min_value=0, step=1, key="p5_g",
-                              help="λ = 1 + g/100 multiplies every service load")
-    lam = IS.lambda_factor(g_group)
-    st.caption(f"λ = 1 + g/100 = **{lam:.2f}**")
-    Df = st.number_input("Founding depth Df (m)", value=1.5, min_value=0.0, step=0.1, key="p5_Df")
+    lam = st.number_input("Load multiplier", min_value=0.01, value=float(demo["factor"]) if demo else 1.0, step=0.01, key="p5_multiplier", help="Multiplier on entered service loads. Use 1.0 for unmodified loads.")
+    Df = st.number_input("Founding depth Df (m)", value=float(st.session_state.foundation_depth), min_value=0.0, step=0.1, key="p5_Df")
+    st.session_state.foundation_depth = Df
+    load_basis = st.radio("Load basis", ["gross_effective", "net"], format_func=lambda x: "Effective gross contact load (kN)" if x == "gross_effective" else "Net foundation load (kN)")
+    st.caption("Gross effective load must exclude pore-water pressure at the footing base; net load already excludes initial effective surcharge. Do not enter total gross load as effective gross below groundwater without conversion.")
+    allow_raw_n = st.checkbox("Allow raw N for illustrative Es estimates (only if no valid correction is available)", value=False)
+    assume_nc = st.checkbox("Explicitly assume NC if Pc is missing", value=False)
+    st.caption("Illustrative defaults only. Replace them with site-specific input before evaluating settlement.")
     t_yr = st.number_input("Design life t (years)", value=50, min_value=1, step=5, key="p5_t")
 
     st.markdown("---")
     st.subheader("Column grid")
-    nx = st.number_input("No. of grid lines 1…n (along length)", value=7, min_value=2, max_value=26, step=1, key="p5_nx")
-    ny = st.number_input("No. of rows A… (across width)", value=4, min_value=2, max_value=26, step=1, key="p5_ny")
+    nx = st.number_input("No. of grid lines 1…n (along length)", value=7 if demo else 3, min_value=2, max_value=26, step=1, key="p5_nx")
+    ny = st.number_input("No. of rows A… (across width)", value=4 if demo else 3, min_value=2, max_value=26, step=1, key="p5_ny")
     span_x = st.number_input("Span between grid lines 1,2,… (m)", value=5.0, min_value=0.5, step=0.5, key="p5_sx")
     span_y = st.number_input("Span between rows A,B,… (m)", value=5.0, min_value=0.5, step=0.5, key="p5_sy")
-    special_txt = st.text_input("Special column(s) (comma-separated, e.g. C4; blank = none)", value="C4", key="p5_special")
+    special_txt = st.text_input("Special column(s) (comma-separated, e.g. C4; blank = none)", value="C4" if demo else "", key="p5_special")
 
     st.markdown("---")
     st.subheader("Drainage (time curve)")
-    drainage = st.radio("Clay layer drainage", ["Two-way (double)", "One-way (single)"], key="p5_drain")
-    clay_H_override = st.number_input("Clay thickness H (m) — override (0 = auto)",
-                                      value=0.0, min_value=0.0, step=0.1, key="p5_H_clay")
-    cv_override = st.number_input("cv (m²/s) — override (0 = layer value)",
-                                  value=0.0, min_value=0.0, step=1e-9, format="%.2e", key="p5_cv",
-                                  help="Lab sheets give cv in cm²/s: 1 cm²/s = 1e-4 m²/s")
+    st.caption("Select drainage and any overrides separately for each clay layer in the consolidation tab.")
 
     st.markdown("---")
     st.subheader("IS 1904:1986 limits")
     soil_choice = st.selectbox(
         "Soil governing the total-settlement limit",
-        ["Auto (clay if Sc > 0)", "Sand / hard clay", "Plastic clay"], key="p5_soilsel")
-    found_type = st.selectbox("Foundation type", ["Isolated footings (RC frame)", "Raft (RC frame)"], key="p5_found")
-    LIM_TABLE = IS.ISOLATED_RC if found_type.startswith("Isolated") else IS.RAFT_RC
+        ["Sand / hard clay", "Plastic clay"], index=1 if demo else 0, key="p5_soilsel")
+    found_type = "Isolated footings (RC frame)"
+    st.caption("Isolated rectangular footings only. Raft limits alone cannot model raft settlement.")
+    structure_category = st.selectbox(
+        "IS 1904 Table 1 structure category",
+        ["General reinforced concrete (ii)", "Multistoreyed framed with panel walls (iii-a)"],
+        index=1 if demo else 0, key="p5_structure_category")
+    LIM_TABLE = (IS.ISOLATED_RC if structure_category.startswith("General")
+                 else IS.ISOLATED_MULTISTOREY)
+    st.caption("Choose and justify the category and limits for the actual structure.")
 
 # ═══════════════════════════ PROFILES / ZONES ══════════════════════════════
 # Optional multi-borehole support: st.session_state["boreholes"] =
 #   {"BH-1": {"layers": [...], "wt_design_bgl": float}, ...}
 # If absent, the single active P1 profile is used for the whole building.
+with st.expander("Save active P1 profile for multi-borehole zoning"):
+    profile_name = st.text_input("Profile name", value=str(st.session_state.borehole_name), key="p5_save_profile_name")
+    if st.button("Save / replace active profile"):
+        try:
+            validate_profile(st.session_state.layers)
+            if not profile_name.strip():
+                raise ValueError("Profile name is required.")
+            st.session_state.setdefault("boreholes", {})[profile_name.strip()] = {
+                "layers": copy.deepcopy(st.session_state.layers), "wt_design_bgl": st.session_state.wt_design_bgl}
+            st.success("Profile snapshot saved. Changes in P1 require saving again.")
+        except ValueError as exc:
+            st.error(str(exc))
+    if st.session_state.get("boreholes"):
+        remove = st.selectbox("Saved profile to remove", list(st.session_state.boreholes), key="p5_remove_profile")
+        if st.button("Remove saved profile"):
+            del st.session_state.boreholes[remove]
+            st.rerun()
 bh_store = st.session_state.get("boreholes")
 if isinstance(bh_store, dict) and len(bh_store) >= 1:
-    profiles = {k: {"layers": v["layers"], "wt": v.get("wt_design_bgl", st.session_state.wt_design_bgl)}
+    profiles = {k: {"layers": v["layers"], "wt": v["wt_design_bgl"]}
                 for k, v in bh_store.items()}
 else:
     profiles = {"Active profile": {"layers": st.session_state.layers, "wt": st.session_state.wt_design_bgl}}
 
 bh_names = sorted(profiles)
+if len(bh_names) > nx:
+    st.error("There are more saved profiles than grid lines. Remove unused profiles or increase grid size.")
+    st.stop()
 chunks = np.array_split(np.arange(1, nx + 1), len(bh_names))
 zone_df = pd.DataFrame({
     "Profile": bh_names,
     "First line": [int(c[0]) if len(c) else 1 for c in chunks],
     "Last line": [int(c[-1]) if len(c) else 1 for c in chunks],
 })
+
+if demo and nx == 7 and set(bh_names) == set(demo["zones"]):
+    zone_df["First line"] = [demo["zones"][k][0] for k in bh_names]
+    zone_df["Last line"] = [demo["zones"][k][1] for k in bh_names]
 
 with st.expander("🗺️ Borehole zoning by grid line (edit to match your justification)", expanded=len(bh_names) > 1):
     if len(bh_names) == 1:
@@ -115,11 +150,13 @@ with st.expander("🗺️ Borehole zoning by grid line (edit to match your justi
     zone_ed = st.data_editor(zone_df, hide_index=True, key="p5_zones", disabled=["Profile"],
                              column_config={"First line": st.column_config.NumberColumn(min_value=1, max_value=int(nx), step=1),
                                             "Last line": st.column_config.NumberColumn(min_value=1, max_value=int(nx), step=1)})
-zones = [{"name": r["Profile"], "first": int(r["First line"]), "last": int(r["Last line"])}
-         for _, r in zone_ed.iterrows()]
-unassigned = [i for i in range(1, int(nx) + 1) if IS.zone_of_line(i, zones) is None]
-if unassigned:
-    st.error(f"Grid lines {unassigned} are not covered by any zone — they fall back to {zones[0]['name']}.")
+try:
+    zones = [{"name": r["Profile"], "first": int(r["First line"]), "last": int(r["Last line"])}
+             for _, r in zone_ed.iterrows()]
+    IS.validate_zones(zones, nx)
+except (ValueError, TypeError) as exc:
+    st.error(str(exc))
+    st.stop()
 
 # ═══════════════════════════ COLUMN TYPES TABLE ════════════════════════════
 special_cols = []
@@ -131,8 +168,12 @@ for tok in [s for s in special_txt.split(",") if s.strip()]:
         special_cols.append(p)
 
 rows = ["Corner", "Edge", "Interior"] + (["Special"] if special_cols else [])
-default_P = {"Corner": 650.0, "Edge": 1000.0, "Interior": 1450.0, "Special": 1450.0}
+default_P = {"Corner": 400.0, "Edge": 600.0, "Interior": 900.0, "Special": 900.0}
 default_B = {"Corner": 2.0, "Edge": 2.5, "Interior": 3.0, "Special": 3.0}
+if demo:
+    default_P = demo["loads"]
+    default_B = demo["widths"]
+    st.warning("C4 load and moment are absent from the supplied table. The demo uses a clearly assumed concentric interior load for C4; this is not an eccentric settlement check.")
 type_df = pd.DataFrame({
     "Type": rows,
     "Service P, unfactored (kN)": [default_P[r] for r in rows],
@@ -141,8 +182,8 @@ type_df = pd.DataFrame({
 })
 
 st.subheader("Column loads and footing sizes")
-auto_size = st.checkbox("Auto-size square footings from a gross bearing pressure", value=False, key="p5_auto")
-q_auto = st.number_input("Gross bearing pressure for sizing q (kPa)", value=150.0, min_value=10.0, step=10.0,
+auto_size = st.checkbox("Auto-size square footings from a pressure on the selected load basis", value=False, key="p5_auto")
+q_auto = st.number_input("Selected-basis pressure for preliminary sizing q (kPa)", value=150.0, min_value=10.0, step=10.0,
                          key="p5_qauto", disabled=not auto_size)
 type_ed = st.data_editor(
     type_df, hide_index=True, key="p5_types", disabled=["Type"],
@@ -154,6 +195,9 @@ type_ed = st.data_editor(
 
 TYPE = {}
 for _, r in type_ed.iterrows():
+    if any(pd.isna(r[k]) or not np.isfinite(float(r[k])) or float(r[k]) <= 0 for k in ("Service P, unfactored (kN)", "B (m)", "L (m)")):
+        st.error("Enter positive finite loads and footing dimensions for every column type.")
+        st.stop()
     P_des = float(r["Service P, unfactored (kN)"]) * lam          # λ applied to EVERY load
     if auto_size:
         Bt = Lt = IS.sqrt_size(P_des, q_auto)
@@ -172,8 +216,12 @@ def settle(ctype, zone):
     if key not in _memo:
         t = TYPE[ctype]
         pf = profiles[zone]
-        imm = schmertmann_settlement(pf["layers"], Df, t["B"], t["L"], t["P_kN"], pf["wt"], t_years=t_yr)
-        con = total_consolidation_settlement(pf["layers"], Df, t["B"], t["L"], t["P_kN"], pf["wt"])
+        try:
+            imm = schmertmann_settlement(pf["layers"], Df, t["B"], t["L"], t["P_kN"], pf["wt"], t_years=t_yr, load_basis=load_basis, allow_raw_n=allow_raw_n)
+            con = total_consolidation_settlement(pf["layers"], Df, t["B"], t["L"], t["P_kN"], pf["wt"], load_basis=load_basis, assume_nc=assume_nc)
+        except ValueError as exc:
+            st.error(f"{ctype} / {zone}: {exc}")
+            st.stop()
         _memo[key] = {"imm": imm, "con": con,
                       "Si": imm["S_mm"], "Sc": con["S_total_mm"], "S": imm["S_mm"] + con["S_total_mm"]}
     return _memo[key]
@@ -185,7 +233,7 @@ special_set = set(special_cols)
 for j in range(int(ny)):
     for i in range(1, int(nx) + 1):
         ctype = "Special" if (i, j) in special_set else IS.classify(i, j, int(nx), int(ny))
-        zone = IS.zone_of_line(i, zones) or zones[0]["name"]
+        zone = IS.zone_of_line(i, zones)
         col_type[(i, j)], col_zone[(i, j)] = ctype, zone
         col_S[(i, j)] = settle(ctype, zone)["S"]
 
@@ -209,30 +257,16 @@ S_i_mm, S_c_mm, S_tot_mm = sel["Si"], sel["Sc"], sel["S"]
 B, L, P_kN = TYPE[sel_type]["B"], TYPE[sel_type]["L"], TYPE[sel_type]["P_kN"]
 layers, wt = profiles[sel_zone]["layers"], profiles[sel_zone]["wt"]
 
-# cv and drainage path for the time curve (selected profile)
-clay_below = [l for l in layers if l.get("is_clay") and l.get("depth_bot", 0) > Df]
-clay_cv = [l for l in clay_below if l.get("cv_m2s")]
-cv_default_used = False
-if cv_override > 0:
-    cv_use = cv_override
-elif clay_cv:
-    cv_use = clay_cv[0]["cv_m2s"]
-else:
-    cv_use, cv_default_used = 6.3e-8, True
-if clay_H_override > 0:
-    H_clay = clay_H_override
-else:
-    H_clay = sum(max(0.0, l["depth_bot"] - max(l["depth_top"], Df)) for l in clay_below) or 2.0
-Hdr = H_clay / 2.0 if drainage.startswith("Two") else H_clay
-t50_yr = T50 * Hdr**2 / cv_use / SEC_PER_YEAR
-t90_yr = T90 * Hdr**2 / cv_use / SEC_PER_YEAR
-t_max = max(float(t_yr), 1.2 * t90_yr)
-t_arr, S_t_mm = time_settlement_curve(S_c_mm / 1000.0, cv_use, Hdr, t_max_years=t_max, n_points=300)
+# Report all model warnings; never hide assumed parameters in compliance.
+for (ct, zn), v in _memo.items():
+    for warning in v["imm"]["warnings"] + v["con"]["warnings"]:
+        st.warning(f"{ct} / {zn}: {warning}")
+st.caption("Granular strain-influence estimate includes creep to the selected design time; clay value is ultimate primary consolidation. Independent footing loads only; neighboring footing interactions and clay immediate settlement are not modeled.")
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Immediate Sᵢ", f"{S_i_mm:.1f} mm", delta="Schmertmann (1978)", delta_color="off")
+m1.metric("Granular Sᵢ at design time", f"{S_i_mm:.1f} mm", delta="Schmertmann (1978)", delta_color="off")
 m2.metric("Consolidation Sc", f"{S_c_mm:.1f} mm", delta="Terzaghi (1943)", delta_color="off")
-m3.metric("Total S = Sᵢ + Sc", f"{S_tot_mm:.1f} mm",
+m3.metric("Granular + ultimate primary Sc", f"{S_tot_mm:.1f} mm",
           delta=f"{'🟢' if S_tot_mm <= TOTAL_LIMIT else '🔴'} limit {TOTAL_LIMIT:.0f} mm", delta_color="off")
 st.markdown("---")
 
@@ -249,7 +283,7 @@ with tab1:
     c3.metric("C₂ (creep)", f"{imm_result['C2']:.4f}", help=f"C₂ = 1 + 0.2 log₁₀(t/0.1), t = {t_yr} yr  [S78]")
     c4.metric("Iz,peak", f"{imm_result['Iz_peak']:.4f}",
               help="Iz,peak = 0.5 + 0.1·√(Δp/σ′vp), σ′vp at the depth of the peak (0.5B square, B strip)  [S78]")
-    st.metric("Total immediate settlement Sᵢ", f"{S_i_mm:.2f} mm")
+    st.metric("Granular settlement at design time Sᵢ", f"{S_i_mm:.2f} mm")
 
     sub = imm_result["sublayer_data"]
     if sub:
@@ -264,8 +298,7 @@ with tab1:
         fig_bar.update_layout(yaxis=dict(autorange="reversed"), height=400)
         show_plot(fig_bar)
     else:
-        st.warning("No granular sublayers in the influence zone (2B below a square footing, up to 4B for a strip). "
-                   "Check the profile has sand/gravel layers with N values.")
+        st.warning("No granular sublayers in the influence zone (2B below a square footing, up to 4B for a strip). Clay immediate settlement is outside this model.")
 
     with st.expander("📐 Formula — Schmertmann (1978)"):
         st.markdown(r"""
@@ -305,16 +338,15 @@ with tab2:
                 "(tick 'Clay' in P1 and enter Cc, Cr, e₀, Pc, cv).")
 
     # e–log p diagram: e0 is the void ratio at σ′v0 (in situ), NOT at Pc
-    with_params = [l for l in layers if l.get("is_clay") and l.get("Cc") and l.get("e0") and l.get("Pc_kPa")]
+    with_params = [l for l in layers if l.get("is_clay") and l["depth_bot"] > Df and l.get("Cc") is not None and l.get("e0") is not None and l.get("Pc_kPa")]
     if with_params and sub_c:
         st.subheader("e–log p curve")
-        ly = with_params[0]
+        ly = st.selectbox("Clay for e–log p curve", with_params, format_func=lambda l: l.get("name", "Clay"), key=f"p5_eplot_{sel_zone}")
         Cc_pl, e0_pl, Pc_pl = ly["Cc"], ly["e0"], ly["Pc_kPa"]
         Cr_pl = ly.get("Cr") or 0.0
         if not ly.get("Cr"):
             st.warning("Cr not entered for this layer — recompression branch drawn flat (Cr = 0).")
-        s0 = float(sub_c[0]["sigma_v0_kPa"]) if "sigma_v0_kPa" in sub_c[0] else float(sub_c[0].get("σ′v0 (kPa)", 1.0))
-        s0 = max(s0, 1.0)
+        s0 = _effective_stress_at(layers, (max(Df, ly["depth_top"]) + ly["depth_bot"])/2, wt)
         e_pc = e0_pl - Cr_pl * np.log10(max(Pc_pl, s0) / s0)          # e at Pc along recompression
         p_re = np.logspace(np.log10(s0), np.log10(max(Pc_pl, s0 * 1.0001)), 30)
         e_re = e0_pl - Cr_pl * np.log10(p_re / s0)
@@ -330,9 +362,10 @@ with tab2:
                          annotation_text=f"Pc = {Pc_pl:.0f} kPa", annotation_position="top right")
 
         with st.expander("Overlay laboratory oedometer data (optional)"):
+            if demo: st.caption("Raw UDS-1 oedometer observations from BH-1 only, regardless of inspected borehole.")
             u = st.selectbox("Pressure unit of the table", ["kg/cm²", "kPa"], key="p5_oed_unit")
-            oed = st.data_editor(pd.DataFrame({"Pressure": [0.0], "Void ratio e": [0.0]}), num_rows="dynamic",
-                                 hide_index=True, key="p5_oed")
+            oed = st.data_editor(pd.DataFrame({"Pressure": [v[0] * (1.0 if u == "kg/cm²" else KGCM2_TO_KPA) for v in OEDOMETER], "Void ratio e": [v[1] for v in OEDOMETER]}) if demo else pd.DataFrame({"Pressure": [0.0], "Void ratio e": [0.0]}), num_rows="dynamic",
+                                 hide_index=True, key=f"p5_oed_{u}")
             oed = oed[(oed["Pressure"] > 0) & (oed["Void ratio e"] > 0)]
             if len(oed):
                 px_kpa = oed["Pressure"] * (KGCM2_TO_KPA if u == "kg/cm²" else 1.0)
@@ -343,36 +376,44 @@ with tab2:
                              yaxis_title="Void ratio e", height=420)
         show_plot(fig_ep)
 
-    # time–settlement
-    st.subheader("Time–settlement curve")
-    if cv_default_used:
-        st.warning("No cv found for a clay layer below Df — a placeholder cv = 6.3e-8 m²/s is used. "
-                   "Enter cv in P1 or use the sidebar override.")
-    a, b, c, d = st.columns(4)
-    a.metric("Clay thickness H", f"{H_clay:.2f} m")
-    b.metric("Drainage path Hdr", f"{Hdr:.2f} m", help="H/2 two-way, H one-way")
-    c.metric("cv", f"{cv_use:.2e} m²/s")
-    d.metric("t₉₀", f"{t90_yr:.2f} yr", help=f"t = Tv·Hdr²/cv with Tv(90%) = {T90}; t₅₀ = {t50_yr:.2f} yr")
-    log_t = st.checkbox("Logarithmic time axis", value=True, key="p5_logt")
-
-    if S_c_mm > 0:
-        m = np.asarray(t_arr) > 0
-        t_p = np.asarray(t_arr)[m] if log_t else np.asarray(t_arr)
-        Sct = np.asarray(S_t_mm)[m] if log_t else np.asarray(S_t_mm)
-        fig_ts = go.Figure()
-        fig_ts.add_trace(go.Scatter(x=t_p, y=Sct, mode="lines", name="Consolidation Sc(t)", line=dict(color="#1f4e79", width=2.5)))
-        fig_ts.add_trace(go.Scatter(x=t_p, y=Sct + S_i_mm, mode="lines", name="Total Sᵢ + Sc(t)",
-                                    line=dict(color="#c0392b", width=2, dash="dash")))
-        for yrs, lab, col in [(t50_yr, "U = 50%", "orange"), (t90_yr, "U = 90%", "red")]:
-            fig_ts.add_vline(x=yrs, line_dash="dash", line_color=col,
-                             annotation_text=f"{lab}  t = {yrs:.2f} yr", annotation_position="top right")
-        fig_ts.add_hline(y=S_c_mm, line_dash="dot", line_color="grey", annotation_text=f"Sc = {S_c_mm:.1f} mm")
-        fig_ts.update_layout(title="Time–settlement (Sᵢ immediate at t = 0)", xaxis_title="Time (years)",
-                             yaxis_title="Settlement (mm)", height=420,
-                             xaxis=dict(type="log" if log_t else "linear"))
-        show_plot(fig_ts)
+    # Time response of each physical clay layer, not of individual numerical sublayers.
+    st.subheader("Time–settlement curve (primary consolidation)")
+    st.caption("Independent 1-D layer response, summed across layers. Confirm each drainage boundary; adjacent clay layers may require a coupled analysis.")
+    clay_results = [r for r in cons_result["layer_results"] if r["Sc_mm"] > 0]
+    configs = {}
+    for r in clay_results:
+        idx = r["layer_idx"]
+        key = f"p5_time_{sel_zone}_{idx}"
+        st.markdown(f"**{r['layer_name']} — H = {r['H_m']:.3f} m**")
+        mode = st.selectbox("Drainage assumption", ["single", "double"], format_func=lambda m: "One-way" if m == "single" else "Two-way", key=key+"_drain")
+        cv = st.number_input("cv (m²/s)", value=float(r["cv_m2s"] or 0.0), min_value=0.0, step=1e-9, format="%.3e", key=key+"_cv")
+        hdr = st.number_input("Drainage path override Hdr (m; 0 = H or H/2)", value=0.0, min_value=0.0, step=0.1, key=key+"_hdr")
+        configs[idx] = {"drainage": mode, "cv_m2s": cv}
+        if hdr > 0:
+            configs[idx]["Hdr_m"] = hdr
+    if clay_results:
+        horizon = st.number_input("Time curve horizon (years)", min_value=0.01, value=float(t_yr), step=1.0, key="p5_curve_horizon")
+        log_t = st.checkbox("Logarithmic time axis", value=True, key="p5_logt")
+        t_arr = np.unique(np.r_[0.0, np.geomspace(max(horizon*1e-8, 1e-10), horizon, 400), np.linspace(0, horizon, 300)])
+        try:
+            S_t_mm, details = multilayer_time_settlement(clay_results, t_arr, configs)
+        except ValueError as exc:
+            st.error(f"Time curve unavailable: {exc}")
+        else:
+            show_df(pd.DataFrame([{k:v for k,v in d.items() if k != "curve_mm"} for d in details]))
+            mask = t_arr > 0 if log_t else np.ones_like(t_arr, dtype=bool)
+            fig_ts = go.Figure()
+            for d in details:
+                fig_ts.add_trace(go.Scatter(x=t_arr[mask], y=d["curve_mm"][mask], mode="lines", name=f"Layer {d['layer_idx']+1}: {d['layer_name']}"))
+            fig_ts.add_trace(go.Scatter(x=t_arr[mask], y=S_t_mm[mask], mode="lines", name="Total primary consolidation", line=dict(width=3)))
+            # S78 creep factor changes with time; t <= 0.1 yr uses C2=1.
+            granular_t = imm_result["S_initial_mm"] * (1 + 0.2*np.log10(np.maximum(t_arr, 0.1)/0.1))
+            fig_ts.add_trace(go.Scatter(x=t_arr[mask], y=(S_t_mm+granular_t)[mask], mode="lines", name="Granular + consolidation", line=dict(dash="dash")))
+            fig_ts.add_hline(y=S_c_mm, line_dash="dot", annotation_text=f"Ultimate primary Sc = {S_c_mm:.1f} mm")
+            fig_ts.update_layout(title="Settlement versus time", xaxis=dict(title="Time (years)", type="log" if log_t else "linear"), yaxis_title="Settlement (mm)", height=420)
+            show_plot(fig_ts)
     else:
-        st.info("No consolidation settlement to plot (Sc = 0 mm).")
+        st.info("No positive primary consolidation settlement for this profile.")
 
     with st.expander("📐 Formulae — 1-D consolidation"):
         st.markdown(r"""
@@ -392,8 +433,7 @@ with tab3:
         f"Limits adopted (**{'plastic clay' if soil_key == 'clay' else 'sand / hard clay'}**): "
         f"total ≤ **{TOTAL_LIMIT:.0f} mm**; differential ≤ **{LIM['diff_ratio']:.4f}·L**; "
         f"angular distortion ≤ **1/{round(1 / LIM['ang_limit'])}**  *(IS 1904:1986 Table 1 — verify against your copy)*")
-    st.caption("Differential settlement and angular distortion are taken between **adjacent columns** joined by a grid line; "
-               "L is that centre-to-centre distance. For one span δ ≤ 0.0015L and β ≤ 1/666 are the same test.")
+    st.caption("Adjacent-column checks are supplemented by the maximum/minimum settlement pair (Cl. 16.3.5). Straight-line grid separation is assumed. This is a screening check only.")
 
     # 1. total
     st.markdown("### 1. Total settlement")
@@ -422,19 +462,21 @@ with tab3:
                                text=[f"{r['S total (mm)']:.1f} mm" for r in rows_tz], textposition="outside"))
     fig_col.add_hline(y=TOTAL_LIMIT, line_dash="dash", line_color="red",
                       annotation_text=f"IS 1904 limit = {TOTAL_LIMIT:.0f} mm")
-    fig_col.update_layout(title=f"Total settlement by column type (λ = {lam:.2f}, g = {g_group})",
+    fig_col.update_layout(title=f"Total settlement by column type (load multiplier = {lam:.2f})",
                           yaxis_title="Total settlement (mm)", height=380)
     show_plot(fig_col)
 
     st.markdown("---")
     # 2. differential / angular distortion on the real grid
-    st.markdown("### 2. Differential settlement & angular distortion (adjacent columns)")
+    st.markdown("### 2. Differential settlement & angular distortion")
     pairs = IS.check_pairs(col_S, int(nx), int(ny), span_x, span_y, LIM)
-    gov = max(pairs, key=lambda p: p.ratio)
-    ok_diff = all(p.ok_diff for p in pairs)
-    ok_ang = all(p.ok_ang for p in pairs)
+    extreme = IS.check_extreme_pair(col_S, int(nx), int(ny), span_x, span_y, LIM)
+    checked_pairs = pairs + ([extreme] if extreme is not None else [])
+    gov = max(checked_pairs, key=lambda p: p.ratio)
+    ok_diff = all(p.ok_diff for p in checked_pairs)
+    ok_ang = all(p.ok_ang for p in checked_pairs)
     g1, g2, g3 = st.columns(3)
-    g1.metric("Max differential δ", f"{max(p.delta_mm for p in pairs):.1f} mm")
+    g1.metric("Max differential δ", f"{max(p.delta_mm for p in checked_pairs):.1f} mm")
     g2.metric("Max angular distortion β", IS.fmt_ratio(gov.ratio),
               delta=f"{'🟢 PASS' if ok_ang else '🔴 FAIL'} (limit 1/{round(1 / LIM['ang_limit'])})", delta_color="off")
     g3.metric("Governing pair", f"{gov.a} ↔ {gov.b}", help=f"L = {gov.L_m:.1f} m, δ = {gov.delta_mm:.1f} mm")
@@ -447,22 +489,29 @@ with tab3:
     with st.expander(f"All {len(pairs)} adjacent column pairs (worst first)", expanded=not (ok_diff and ok_ang)):
         show_df(df_pairs)
 
+    if extreme is not None:
+        st.markdown("#### Global maximum/minimum settlement pair (Clause 16.3.5)")
+        show_df(pd.DataFrame([{
+            "Pair": f"{extreme.a} ↔ {extreme.b}", "Distance (m)": extreme.L_m,
+            "Differential (mm)": extreme.delta_mm, "Limit (mm)": extreme.limit_mm,
+            "Angular distortion": IS.fmt_ratio(extreme.ratio),
+            "Differential check": "PASS" if extreme.ok_diff else "FAIL",
+            "Angular check": "PASS" if extreme.ok_ang else "FAIL"}]))
     st.markdown("---")
     st.markdown("### 3. Overall verdict")
     if ok_total and ok_diff and ok_ang:
-        st.success(f"✅ All IS 1904:1986 settlement checks PASS for {found_type.lower()} at these sizes. "
-                   "(Bearing capacity, FoS = 3.0, is checked separately in P3.)")
+        st.success("Calculated settlement values satisfy the adopted screening limits. This is not foundation approval; verify input data, limits, interactions, eccentricity and bearing capacity separately.")
     else:
         fails = [n for n, ok in [("total settlement", ok_total), ("differential settlement", ok_diff),
                                  ("angular distortion", ok_ang)] if not ok]
         st.error(f"❌ FAIL: {', '.join(fails)}.\n\n"
-                 "Options: larger footings · deeper founding · raft (limits above switch with the sidebar) · "
+                 "Options for separate engineering assessment: larger footings · deeper founding · raft · "
                  "piles to the gravel · ground improvement (preloading, stone columns). Justify the choice in the report.")
 
-    with st.expander("📋 IS 1904:1986 Table 1 values used (verify against the standard)"):
-        show_df(pd.DataFrame([
-            {"Foundation": "Isolated, RC", "Soil": "Sand / hard clay", "Total (mm)": 50, "Differential": "0.0015 L", "Angular dist.": "1/666"},
-            {"Foundation": "Isolated, RC", "Soil": "Plastic clay", "Total (mm)": 75, "Differential": "0.0015 L", "Angular dist.": "1/666"},
-            {"Foundation": "Raft, RC", "Soil": "Sand / hard clay", "Total (mm)": 75, "Differential": "0.002 L", "Angular dist.": "1/500"},
-            {"Foundation": "Raft, RC", "Soil": "Plastic clay", "Total (mm)": 100, "Differential": "0.002 L", "Angular dist.": "1/500"},
-        ]))
+    with st.expander("📋 Adopted limits from shared IS1904 utility (verify against standard)"):
+        show_df(pd.DataFrame([{"Foundation": label, "Soil": soil, "Total (mm)": vals["total_mm"],
+                               "Differential ratio": vals["diff_ratio"], "Angular ratio": vals["ang_limit"]}
+                              for label, table in (("Isolated, RC (ii)", IS.ISOLATED_RC), ("Raft, RC (ii)", IS.RAFT_RC),
+                                                    ("Isolated, multistoreyed (iii-a)", IS.ISOLATED_MULTISTOREY),
+                                                    ("Raft, multistoreyed (iii-a)", IS.RAFT_MULTISTOREY))
+                              for soil, vals in table.items()]))
