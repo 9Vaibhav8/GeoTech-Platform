@@ -8,7 +8,7 @@ GeoForge is an interactive, browser-based toolkit for geotechnical analysis and 
 
 Designed for students, researchers and engineering practitioners, GeoForge supports user-defined soil profiles, groundwater conditions, footing geometries and loading scenarios. It is not restricted to a particular site, building or institution.
 
-[![Open GeoForge](https://img.shields.io/badge/Live%20App-Open%20GeoForge-0F766E?style=for-the-badge&logo=streamlit&logoColor=white)](https://geotech-platformgit-5hgqwskkbpyo8z2zykgfiq.streamlit.app/)
+[![Open GeoForge](https://img.shields.io/badge/Live%20App-Open%20GeoForge-0F766E?style=for-the-badge&logo=streamlit&logoColor=white)](https://geotech-platform-acxehxhfdynfudwuvmh487.streamlit.app/)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Interface-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
