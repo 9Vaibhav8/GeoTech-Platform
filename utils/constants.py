@@ -1,13 +1,14 @@
 """
 utils/constants.py
-Shared session state keys, default layer structure, and soil symbols.
+Shared session state keys, editable example profile, and soil symbols.
+All initial soil/site values are illustrative, not measured data or calculation constants.
 """
 import streamlit as st
 
 # IS 1498 soil symbols available in the app
 SOIL_SYMBOLS = ["Fill", "SM", "SP", "SW", "SC", "ML", "CL", "CI", "CH", "MH", "GW", "GP", "GM", "GC"]
 
-# Default layer structure — every layer dict follows this schema
+# Editable starter layer — values are illustrative, not measured soil properties.
 DEFAULT_LAYER = {
     "depth_top": 0.0,      # m bgl (below ground level)
     "depth_bot": 1.5,      # m bgl
@@ -22,6 +23,8 @@ DEFAULT_LAYER = {
     "Es_kPa": None,        # Elastic modulus Es in kPa (None if not entered; optional SPT estimate used)
     "N_field": None,       # Observed SPT N (None if not tested)
     "N_corrected": None,   # IS 2131 corrected N (filled by P2)
+    "N_refusal": False,    # Refusal is not an exact SPT N
+    "N_refusal_note": "", # Reported blows / penetration, if applicable
     # Consolidation params (clay layers only; None if not applicable)
     "Cc": None,            # Compression index
     "Cr": None,            # Recompression index
@@ -35,29 +38,32 @@ DEFAULT_LAYER = {
 def init_session_state():
     """Initialize all session state keys if not already set."""
     if "layers" not in st.session_state:
-        # Default: a simple 3-layer profile
+        # Synthetic editable example (not the assignment borehole).
+        # Retain a nonempty profile for existing modules that expect layers.
         st.session_state.layers = [
             {**DEFAULT_LAYER, "depth_top": 0.0, "depth_bot": 1.5,
-             "name": "Sandy Silt Fill", "symbol": "SM",
-             "gamma_moist": 16.5, "gamma_sat": 19.0,
+             "name": "Example silty sand", "symbol": "SM",
+             "gamma_moist": 17.0, "gamma_sat": 19.5,
              "c_prime": 0.0, "phi_prime": 28.0, "N_field": 10},
             {**DEFAULT_LAYER, "depth_top": 1.5, "depth_bot": 5.0,
-             "name": "Medium Dense Sand", "symbol": "SP",
+             "name": "Example medium dense sand", "symbol": "SP",
              "gamma_moist": 19.0, "gamma_sat": 20.5,
              "c_prime": 0.0, "phi_prime": 32.0, "N_field": 25},
             {**DEFAULT_LAYER, "depth_top": 5.0, "depth_bot": 10.0,
-             "name": "Silty Clay", "symbol": "CI",
+             "name": "Example silty clay", "symbol": "CI",
              "gamma_moist": 18.5, "gamma_sat": 18.5,
              "c_prime": 5.0, "phi_prime": 20.0, "cu": 30.0,
              "is_undrained": True, "is_clay": True,
-             "Cc": 0.31, "Cr": 0.06, "e0": 0.918, "Pc_kPa": 200.0,
-             "cv_m2s": 6.3e-8},
+             "Cc": 0.25, "Cr": 0.04, "e0": 0.85, "Pc_kPa": 150.0,
+             "cv_m2s": 5.0e-8},
         ]
     if "wt_measured_bgl" not in st.session_state:
-        st.session_state.wt_measured_bgl = 2.6   # m bgl
+        st.session_state.wt_measured_bgl = 3.0   # m bgl, illustrative
     if "wt_design_bgl" not in st.session_state:
-        st.session_state.wt_design_bgl = 1.0     # m bgl (worst case — highest seasonal)
+        st.session_state.wt_design_bgl = 2.0   # m bgl, illustrative design water level
     if "ground_rl" not in st.session_state:
-        st.session_state.ground_rl = 100.0        # m RL
+        st.session_state.ground_rl = 0.0   # m RL, illustrative datum
     if "borehole_name" not in st.session_state:
-        st.session_state.borehole_name = "BH-1"
+        st.session_state.borehole_name = "Example profile (edit before design)"
+    if "foundation_depth" not in st.session_state:
+        st.session_state.foundation_depth = 1.5  # m, editable P1 preview default
