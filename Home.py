@@ -19,19 +19,24 @@ init_session_state()
 
 # ── Sidebar branding ──────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🏗️ GeoForge")
+    st.markdown("## 🏗️ CE 402 Platform")
     st.markdown("**IIT Mandi**  \nDepartment of Civil Engineering")
     st.markdown("---")
     st.caption("Version 1.0.0")
     st.caption("Academic use only")
     st.markdown("---")
+    st.info(
+        "👈 Use the sidebar links above to navigate between analysis modules."
+    )
 
 # ── Main header ───────────────────────────────────────────────────────────────
-st.title("🏗️ GeoForge")
+st.title("🏗️ CE 402 Geotechnical Engineering Platform")
+st.subheader("IIT Mandi — Hostel Foundation Design")
 st.markdown(
     """
 This interactive platform supports the geotechnical analysis and design workflow
-. Each module corresponds to a distinct analytical step — from soil profiling through to final settlement
+for the **IIT Mandi hostel foundation** project. Each module corresponds to a
+distinct analytical step — from soil profiling through to final settlement
 predictions — and all modules share a common soil-layer data model so that
 results flow seamlessly from one stage to the next.
 """
@@ -115,4 +120,7 @@ for i, (title, body) in enumerate(steps, start=1):
         st.markdown(body)
 
 st.markdown("---")
-
+st.caption(
+    "CE 402 Geotechnical Engineering · IIT Mandi · "
+    "Platform developed for academic foundation-design assignments."
+)
