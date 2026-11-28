@@ -1,402 +1,227 @@
-"""
-utils/spt_corrections.py
-IS 2131:1981 SPT correction functions, Mohr-Coulomb OLS fitting, and UU cu helpers.
-All computations strictly in SI units (m, kPa, kN/m³, deg).
+"""P2 — SPT corrections, strength fitting and UU analysis (SI units).
 
-References
-----------
-IS 2131:1981 — Method for Standard Penetration Test for Soils:
-  Cl. 3.6.1 & Fig. 1 : Overburden pressure correction (Peck, Hanson & Thornburn 1974)
-  Cl. 3.6.2          : Dilatancy / submergence correction (Terzaghi & Peck 1967)
+IS 2131:1981, clauses 3.3.3, 3.6.1 (Fig. 1), 3.6.2.
+The logarithmic C_N expression is an approximation to Fig. 1, not a
+literal equation printed in the 1981 standard. Outside the chart's stress
+range an independently justified method is required.
 """
-
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
+from .bearing_capacity import effective_overburden_pressure, validate_profile, GAMMA_W
 
-GAMMA_W = 9.81  # kN/m³, unit weight of water
-
-SOIL_CLASSES = [
-    "Fine/Silty Sand",
-    "Coarse/Medium Sand",
-    "Clay",
-    "Cobble/Boulder Gravel",
-    "Fill",
-]
-
-OVERBURDEN_ELIGIBLE_CLASSES = {"Fine/Silty Sand", "Coarse/Medium Sand"}
+SOIL_CLASSES = ["Fine/Silty Sand", "Coarse/Medium Sand", "Clay",
+                "Cobble/Boulder Gravel", "Fill", "Cohesionless Gravel (valid SPT)"]
+OVERBURDEN_ELIGIBLE_CLASSES = {"Fine/Silty Sand", "Coarse/Medium Sand", "Cohesionless Gravel (valid SPT)"}
 DILATANCY_ELIGIBLE_CLASSES = {"Fine/Silty Sand"}
+_SYMBOL_TO_CLASS = {"SM": "Fine/Silty Sand", "ML": "Fine/Silty Sand",
+    "SP": "Coarse/Medium Sand", "SW": "Coarse/Medium Sand", "SC": "Coarse/Medium Sand",
+    "CL": "Clay", "CI": "Clay", "CH": "Clay", "MH": "Clay",
+    "GW": "Cobble/Boulder Gravel", "GP": "Cobble/Boulder Gravel",
+    "GM": "Cobble/Boulder Gravel", "GC": "Cobble/Boulder Gravel", "FILL": "Fill"}
+# IS 2131:1981 Fig. 1 extends to 5 kgf/cm²; 1 kgf/cm² = 98.0665 kPa.
+MAX_CHART_STRESS_KPA = 5.0 * 98.0665
 
-_SYMBOL_TO_CLASS = {
-    "SM": "Fine/Silty Sand",
-    "ML": "Fine/Silty Sand",
-    "SP": "Coarse/Medium Sand",
-    "SW": "Coarse/Medium Sand",
-    "SC": "Coarse/Medium Sand",
-    "CL": "Clay",
-    "CI": "Clay",
-    "CH": "Clay",
-    "MH": "Clay",
-    "GW": "Cobble/Boulder Gravel",
-    "GP": "Cobble/Boulder Gravel",
-    "GM": "Cobble/Boulder Gravel",
-    "GC": "Cobble/Boulder Gravel",
-    "Fill": "Fill",
-}
+
+def _number(value, name, minimum=0.0):
+    try:
+        x = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be numeric.") from exc
+    if not math.isfinite(x) or x < minimum:
+        raise ValueError(f"{name} must be finite and at least {minimum:g}.")
+    return x
 
 
 def map_symbol_to_soil_class(symbol_or_class: str) -> str:
-    """Map an IS 1498 soil symbol (or existing soil class) to a canonical SPT soil class."""
-    if symbol_or_class in SOIL_CLASSES:
-        return symbol_or_class
-    return _SYMBOL_TO_CLASS.get(str(symbol_or_class).strip(), "Fill")
+    """Provisional grouping; grain size and test validity need user confirmation."""
+    text = str(symbol_or_class).strip()
+    if text in SOIL_CLASSES:
+        return text
+    if text.upper() in _SYMBOL_TO_CLASS:
+        return _SYMBOL_TO_CLASS[text.upper()]
+    raise ValueError(f"Unknown SPT soil class/symbol: {text}. Select a supported class explicitly.")
 
 
 def effective_stress(layers: List[Dict], depth_m: float, wt_bgl: float) -> float:
+    """Share the strict stratified effective-stress implementation used by P3.
+
+    Use measured/test-time groundwater, not the design water table. No
+    default unit weights, gaps, overlaps or implicit extrapolation.
     """
-    Compute effective vertical stress σ'v at a given depth (m bgl) using exact
-    interval splitting against the measured water table depth `wt_bgl`.
-
-    Uses γ_moist above `wt_bgl` and (γ_sat - γ_w) below `wt_bgl`.
-
-    Parameters
-    ----------
-    layers  : list[dict] — soil profile layers with depth_top, depth_bot, gamma_moist, gamma_sat
-    depth_m : float      — target test depth in metres below ground level (m bgl)
-    wt_bgl  : float      — measured water-table depth in metres below ground level (m bgl)
-
-    Returns
-    -------
-    float — σ'v (kPa)
-    """
-    if depth_m <= 0.0 or not layers:
-        return 0.0
-
-    sorted_layers = sorted(layers, key=lambda lyr: float(lyr["depth_top"]))
-    sigma_v = 0.0
-
-    for layer in sorted_layers:
-        d_top = float(layer["depth_top"])
-        d_bot = float(layer["depth_bot"])
-        if d_top >= depth_m:
-            break
-
-        slice_top = max(0.0, d_top)
-        slice_bot = min(depth_m, d_bot)
-        if slice_bot <= slice_top:
-            continue
-
-        gamma_moist = float(layer.get("gamma_moist", 18.0))
-        gamma_sat = float(layer.get("gamma_sat", 20.0))
-        gamma_sub = gamma_sat - GAMMA_W
-
-        if slice_bot <= wt_bgl:
-            # Source: IS 2131:1981 Cl. 3.6.1 (moist unit weight above measured WT)
-            sigma_v += gamma_moist * (slice_bot - slice_top)
-        elif slice_top >= wt_bgl:
-            # Source: IS 2131:1981 Cl. 3.6.1 (submerged unit weight below measured WT)
-            sigma_v += gamma_sub * (slice_bot - slice_top)
-        else:
-            # Exact split at wt_bgl when interval straddles the water table
-            dz_above = wt_bgl - slice_top
-            dz_below = slice_bot - wt_bgl
-            # Source: IS 2131:1981 Cl. 3.6.1 (split interval across measured WT)
-            sigma_v += gamma_moist * dz_above + gamma_sub * dz_below
-
-    # If depth_m extends below the bottom of the last defined layer, extrapolate with last layer
-    max_bot = max(float(lyr["depth_bot"]) for lyr in sorted_layers)
-    if depth_m > max_bot:
-        last = sorted_layers[-1]
-        gamma_moist = float(last.get("gamma_moist", 18.0))
-        gamma_sub = float(last.get("gamma_sat", 20.0)) - GAMMA_W
-        slice_top = max_bot
-        slice_bot = depth_m
-        if slice_bot <= wt_bgl:
-            # Source: IS 2131:1981 Cl. 3.6.1
-            sigma_v += gamma_moist * (slice_bot - slice_top)
-        elif slice_top >= wt_bgl:
-            # Source: IS 2131:1981 Cl. 3.6.1
-            sigma_v += gamma_sub * (slice_bot - slice_top)
-        else:
-            # Source: IS 2131:1981 Cl. 3.6.1
-            sigma_v += gamma_moist * (wt_bgl - slice_top) + gamma_sub * (slice_bot - wt_bgl)
-
-    return max(sigma_v, 0.0)
+    if not layers:
+        raise ValueError("No soil profile. Enter layers in P1.")
+    return effective_overburden_pressure(layers, depth_m, wt_bgl)[0]
 
 
 def overburden_correction(sigma_v_kPa: float) -> float:
+    """Approximation to IS 2131:1981 Fig. 1 (Peck et al. logarithmic fit).
+
+    Existing 2000 kPa approximation retained, limited to chart stress range.
+    The cap at 2 represents the low-stress end of the curve.
     """
-    IS 2131:1981 Cl. 3.6.1 & Fig. 1 (Peck, Hanson & Thornburn 1974)
-    Overburden correction factor C_N for cohesionless sands:
-
-        C_N = min(2.0, 0.77 * log10(2000 / σ'v))
-
-    Parameters
-    ----------
-    sigma_v_kPa : float — effective vertical overburden stress σ'v (kPa)
-
-    Returns
-    -------
-    float — C_N (dimensionless, capped at 2.0)
-    """
-    if sigma_v_kPa <= 0.0:
-        # Source: IS 2131:1981 Cl. 3.6.1 & Fig. 1 (upper cap at zero overburden)
+    s = _number(sigma_v_kPa, "Effective overburden stress")
+    if s > MAX_CHART_STRESS_KPA:
+        raise ValueError(f"Effective stress {s:g} kPa exceeds the IS 2131:1981 Fig. 1 range (~{MAX_CHART_STRESS_KPA:.1f} kPa). Use a justified alternative.")
+    if s == 0.0:
         return 2.0
-    # Source: IS 2131:1981 Cl. 3.6.1 & Fig. 1 (Peck, Hanson & Thornburn 1974)
-    cn = 0.77 * math.log10(2000.0 / sigma_v_kPa)
-    # Source: IS 2131:1981 Cl. 3.6.1 & Fig. 1 (maximum C_N cap = 2.0)
-    return min(2.0, cn)
+    return min(2.0, 0.77 * (math.log10(2000.0) - math.log10(s)))
 
 
-def dilatancy_correction(
-    N_prime: float,
-    soil_class_or_symbol: str,
-    depth_m: float,
-    wt_measured_bgl: float,
-) -> Tuple[int, bool]:
+def dilatancy_correction(N_prime: float, soil_class_or_symbol: str,
+                         depth_m: float, wt_measured_bgl: float) -> Tuple[float, bool]:
+    """IS 2131:1981 cl. 3.6.2. Retain precision through both corrections."""
+    n = _number(N_prime, "Overburden-corrected N")
+    depth = _number(depth_m, "Test depth")
+    wt = _number(wt_measured_bgl, "Measured water table")
+    applies = (map_symbol_to_soil_class(soil_class_or_symbol) in DILATANCY_ELIGIBLE_CLASSES
+               and depth > wt and n > 15.0)
+    return (15.0 + 0.5 * (n - 15.0), True) if applies else (n, False)
+
+
+def correct_spt_records(records: List[Dict], layers: List[Dict],
+                        wt_measured_bgl: float) -> List[Dict]:
+    """Correct arbitrary test records; preserve existing output dictionary keys.
+
+    Optional input fields: is_refusal, excluded, note, estimated_depth.
+    A missing N is allowed only for refusal/excluded records. For legacy
+    compatibility, N >= 100 is conservatively treated as a
+    refusal placeholder (not an IS refusal criterion). Explicit refusal or
+    incomplete penetration is recorded separately per cl. 3.3.3.
     """
-    IS 2131:1981 Cl. 3.6.2 (Terzaghi & Peck 1967) — Dilatancy correction
-    for fine/silty sands and silts below the measured water table when N' > 15:
-
-        N'' = 15 + 0.5 * (N' - 15)
-
-    Does NOT apply to coarse/medium sands (e.g. gravelly SP), clays, or gravels.
-
-    Parameters
-    ----------
-    N_prime              : float or int — overburden-corrected N'
-    soil_class_or_symbol : str          — canonical soil class or IS 1498 symbol
-    depth_m              : float        — test depth (m bgl)
-    wt_measured_bgl      : float        — measured water-table depth during SPT (m bgl)
-
-    Returns
-    -------
-    (N_double_prime: int, applied: bool)
-    """
-    soil_class = map_symbol_to_soil_class(soil_class_or_symbol)
-    apply = (
-        soil_class in DILATANCY_ELIGIBLE_CLASSES
-        and depth_m > wt_measured_bgl
-        and N_prime > 15
-    )
-    if apply:
-        # Source: IS 2131:1981 Cl. 3.6.2 (Terzaghi & Peck 1967 dilatancy correction)
-        n_double_prime = int(round(15.0 + 0.5 * (N_prime - 15.0)))
-        return n_double_prime, True
-    return int(round(N_prime)), False
-
-
-def correct_spt_records(
-    records: List[Dict],
-    layers: List[Dict],
-    wt_measured_bgl: float,
-) -> List[Dict]:
-    """
-    Apply full IS 2131:1981 SPT correction sequence to arbitrary depth-specific records.
-
-    Rules enforced:
-    1. σ'v computed against measured (test-time) water table `wt_measured_bgl`.
-    2. Raw N_field >= 100 flagged as Refusal and excluded from correlations.
-    3. Overburden correction C_N (Cl. 3.6.1) applied ONLY to 'Fine/Silty Sand'
-       and 'Coarse/Medium Sand'.
-    4. Dilatancy correction (Cl. 3.6.2) applied AFTER C_N, and ONLY to
-       'Fine/Silty Sand' below `wt_measured_bgl` when N' > 15.
-
-    Parameters
-    ----------
-    records         : list[dict] — each dict has depth_m, soil_class (or symbol), N_field
-    layers          : list[dict] — layered profile from P1
-    wt_measured_bgl : float      — measured WT depth during boring (m bgl)
-
-    Returns
-    -------
-    list[dict] — detailed intermediate and final results for every test record
-    """
+    wt = _number(wt_measured_bgl, "Measured water table")
+    if not records:
+        return []
+    ordered = validate_profile(layers)
     results = []
-    sorted_records = sorted(records, key=lambda r: float(r["depth_m"]))
-
-    for rec in sorted_records:
-        depth_m = float(rec["depth_m"])
-        raw_n = float(rec["N_field"])
-        soil_class = map_symbol_to_soil_class(rec.get("soil_class", rec.get("symbol", "Fill")))
-
-        sigma_v = effective_stress(layers, depth_m, wt_measured_bgl)
-        below_wt = depth_m > wt_measured_bgl
-        is_refusal = raw_n >= 100.0
-
-        if is_refusal:
-            results.append({
-                "depth_m": depth_m,
-                "soil_class": soil_class,
-                "N_field": int(round(raw_n)),
-                "sigma_v": sigma_v,
-                "CN": None,
-                "N_prime": None,
-                "below_wt": below_wt,
-                "dilatancy_applied": False,
-                "N_final": None,
-                "is_refusal": True,
-                "notes": "Refusal (N ≥ 100) — excluded from correlations",
-            })
-            continue
-
-        if soil_class not in OVERBURDEN_ELIGIBLE_CLASSES:
-            results.append({
-                "depth_m": depth_m,
-                "soil_class": soil_class,
-                "N_field": int(round(raw_n)),
-                "sigma_v": sigma_v,
-                "CN": None,
-                "N_prime": int(round(raw_n)),
-                "below_wt": below_wt,
-                "dilatancy_applied": False,
-                "N_final": int(round(raw_n)),
-                "is_refusal": False,
-                "notes": f"{soil_class} — C_N and dilatancy N/A per IS 2131",
-            })
-            continue
-
-        # Step 1: Overburden correction (IS 2131:1981 Cl. 3.6.1 & Fig. 1)
-        cn = overburden_correction(sigma_v)
-        # Source: IS 2131:1981 Cl. 3.6.1 (overburden-corrected SPT N')
-        n_prime = int(round(cn * raw_n))
-
-        # Step 2: Dilatancy correction (IS 2131:1981 Cl. 3.6.2)
-        n_final, dil_applied = dilatancy_correction(
-            n_prime, soil_class, depth_m, wt_measured_bgl
-        )
-
-        if dil_applied:
-            note = "C_N (Cl. 3.6.1) + Dilatancy (Cl. 3.6.2)"
-        elif soil_class == "Coarse/Medium Sand" and below_wt and n_prime > 15:
-            note = "C_N (Cl. 3.6.1); Dilatancy N/A for Coarse/Medium Sand"
-        elif soil_class == "Fine/Silty Sand" and below_wt and n_prime <= 15:
-            note = "C_N (Cl. 3.6.1); N' ≤ 15 (no dilatancy)"
-        else:
-            note = "C_N (Cl. 3.6.1); above measured WT"
-
-        results.append({
-            "depth_m": depth_m,
-            "soil_class": soil_class,
-            "N_field": int(round(raw_n)),
-            "sigma_v": sigma_v,
-            "CN": cn,
-            "N_prime": n_prime,
-            "below_wt": below_wt,
-            "dilatancy_applied": dil_applied,
-            "N_final": n_final,
-            "is_refusal": False,
-            "notes": note,
-        })
-
-    return results
-
-
-def correct_spt(layers: List[Dict], wt_measured_bgl: float) -> List[Dict]:
-    """
-    Apply IS 2131:1981 corrections to layer-level N_field values at layer mid-depths.
-    Mutates `layer['N_corrected']` in place (set to None for refusal records).
-
-    Parameters
-    ----------
-    layers          : list[dict] — session-state layers (mutated in place)
-    wt_measured_bgl : float      — measured WT depth during SPT (m bgl)
-
-    Returns
-    -------
-    list[dict] — per-layer correction records
-    """
-    results = []
-    for i, layer in enumerate(layers):
-        if layer.get("N_field") is None:
-            continue
-
-        depth_mid = (float(layer["depth_top"]) + float(layer["depth_bot"])) / 2.0
-        soil_class = map_symbol_to_soil_class(layer.get("symbol", "Fill"))
-        rec = correct_spt_records(
-            [{"depth_m": depth_mid, "soil_class": soil_class, "N_field": layer["N_field"]}],
-            layers,
-            wt_measured_bgl,
-        )[0]
-
-        layer["N_corrected"] = rec["N_final"]
-        results.append({
-            "layer_idx": i,
-            "depth_mid": rec["depth_m"],
-            "soil_class": rec["soil_class"],
-            "sigma_v": rec["sigma_v"],
-            "CN": rec["CN"],
-            "N_field": rec["N_field"],
-            "N_corr1": rec["N_prime"],
-            "N_prime": rec["N_prime"],
-            "below_wt": rec["below_wt"],
-            "dilatancy_applied": rec["dilatancy_applied"],
-            "N_corrected": rec["N_final"],
-            "N_final": rec["N_final"],
-            "is_refusal": rec["is_refusal"],
-            "notes": rec["notes"],
-        })
-
-    return results
+    for i, rec in enumerate(records, 1):
+        try:
+            depth = _number(rec.get("depth_m"), "Test depth")
+            soil = map_symbol_to_soil_class(rec.get("soil_class", rec.get("symbol", "")))
+            raw = rec.get("N_field")
+            if raw is not None:
+                raw = _number(raw, "Observed N")
+                if not raw.is_integer():
+                    raise ValueError("Observed N must be an integer count.")
+                raw = int(raw)
+            refusal = bool(rec.get("is_refusal", rec.get("N_refusal", False))) or (raw is not None and raw >= 100)
+            excluded = bool(rec.get("excluded", False))
+            if raw is None and not (refusal or excluded):
+                raise ValueError("Enter observed N or flag refusal/exclusion.")
+            sigma = effective_stress(ordered, depth, wt)
+            below = depth > wt
+            result = dict(depth_m=depth, soil_class=soil, N_field=raw, sigma_v=sigma,
+                          CN=None, N_prime=None, below_wt=below, dilatancy_applied=False,
+                          N_final=None, is_refusal=refusal, excluded=excluded,
+                          estimated_depth=bool(rec.get("estimated_depth", False)))
+            if refusal:
+                note = "Refusal / incomplete penetration / legacy N≥100 flag — no correlation"
+            elif excluded:
+                note = "Excluded by user — no correlation"
+            elif soil not in OVERBURDEN_ELIGIBLE_CLASSES:
+                result.update(N_prime=float(raw), N_final=float(raw))
+                note = "Raw N retained; no correction for selected class"
+            else:
+                cn = overburden_correction(sigma)
+                n_prime = cn * raw  # IS 2131:1981 cl. 3.6.1, Fig. 1
+                n_final, applied = dilatancy_correction(n_prime, soil, depth, wt)
+                result.update(CN=cn, N_prime=n_prime, N_final=n_final, dilatancy_applied=applied)
+                note = "Overburden + dilatancy" if applied else "Overburden only (dilatancy conditions not met)"
+            if result["estimated_depth"]:
+                note += "; estimated layer midpoint — verify actual test depth"
+            if rec.get("note"):
+                note += "; " + str(rec["note"])
+            result["notes"] = note
+            results.append(result)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"SPT record {i}: {exc}") from exc
+    return sorted(results, key=lambda r: r["depth_m"])
 
 
 def build_default_spt_records(layers: List[Dict]) -> List[Dict]:
-    """Generate initial depth-specific SPT records from P1 soil layers that have N_field."""
+    """Import representative P1 counts, explicitly labeling assumed mid-depths."""
     records = []
-    for layer in sorted(layers, key=lambda lyr: float(lyr["depth_top"])):
-        if layer.get("N_field") is not None:
-            depth_mid = round((float(layer["depth_top"]) + float(layer["depth_bot"])) / 2.0, 2)
-            records.append({
-                "depth_m": depth_mid,
-                "soil_class": map_symbol_to_soil_class(layer.get("symbol", "Fill")),
-                "N_field": int(round(float(layer["N_field"]))),
-            })
+    for layer in sorted(layers, key=lambda l: float(l["depth_top"])):
+        refusal = bool(layer.get("N_refusal"))
+        if layer.get("N_field") is None and not refusal:
+            continue
+        depth = (float(layer["depth_top"]) + float(layer["depth_bot"])) / 2
+        records.append(dict(depth_m=depth, soil_class=map_symbol_to_soil_class(layer["symbol"]),
+                            N_field=layer.get("N_field"), is_refusal=refusal, excluded=False,
+                            note=layer.get("N_refusal_note", "") if refusal else "",
+                            estimated_depth=True))
     return records
 
 
-def fit_mohr_coulomb(
-    sigma_n_arr: Sequence[float],
-    tau_arr: Sequence[float],
-) -> Tuple[float, float, float]:
+def correct_spt(layers: List[Dict], wt_measured_bgl: float) -> List[Dict]:
+    """Legacy layer-level interface; update only after all records validate."""
+    if layers:
+        validate_profile(layers)
+    pending = []
+    for i, layer in enumerate(layers):
+        records = build_default_spt_records([layer])
+        if records:
+            r = correct_spt_records(records, layers, wt_measured_bgl)[0]
+            pending.append((i, r))
+    for layer in layers:
+        layer["N_corrected"] = None
+    results = []
+    for i, r in pending:
+        layers[i]["N_corrected"] = r["N_final"]
+        results.append(dict(r, layer_idx=i, depth_mid=r["depth_m"],
+                            N_corr1=r["N_prime"], N_corrected=r["N_final"]))
+    return results
+
+
+def apply_spt_to_layers(layers: List[Dict], results: List[Dict]) -> List[str]:
+    """Replace (not accumulate) layer-average corrections. Raw P1 data unchanged.
+
+    Half-open depth intervals, except the final profile bottom. Refusal and
+    excluded records never contribute. P1 refusal flags take precedence.
     """
-    Ordinary Least Squares (OLS) fit of the Mohr-Coulomb failure envelope:
-        τ = c′ + σ_n · tan(φ′)
+    ordered = validate_profile(layers)
+    messages = []
+    for i, layer in enumerate(ordered):
+        top, bottom = float(layer["depth_top"]), float(layer["depth_bot"])
+        matching = [r for r in results if top <= r["depth_m"] < bottom or
+                    (i == len(ordered)-1 and r["depth_m"] == bottom)]
+        valid = [r["N_final"] for r in matching if r.get("N_final") is not None
+                 and not r.get("is_refusal") and not r.get("excluded")]
+        layer["N_corrected"] = (math.fsum(valid) / len(valid) if valid and not layer.get("N_refusal") else None)
+        layer["P2_spt_status"] = ("corrected" if layer["N_corrected"] is not None else
+                                  "no_valid_record" if matching else "no_record")
+        val = layer["N_corrected"]
+        messages.append(f"{layer.get('name', f'Layer {i+1}')}: " + (f"N_corrected = {val:.2f}" if val is not None else "no corrected N (previous value cleared)"))
+    return messages
 
-    Parameters
-    ----------
-    sigma_n_arr : array-like — normal stresses σ_n (kPa), length ≥ 2
-    tau_arr     : array-like — shear stresses at failure τ_f (kPa), same length
 
-    Returns
-    -------
-    (c_prime_kPa: float, phi_prime_deg: float, r_squared: float)
+def fit_mohr_coulomb(sigma_n_arr: Sequence[float], tau_arr: Sequence[float]) -> Tuple[float, float, float]:
+    """OLS of Mohr-Coulomb τ = c′ + σ_n tan φ′; return unconstrained fit.
+
+    Negative intercept/slope are shown, not silently clipped. The UI blocks
+    transferring such parameters until the engineer resolves the fit.
     """
-    sigma_n = [float(x) for x in sigma_n_arr]
-    tau = [float(y) for y in tau_arr]
+    x = [_number(v, "Normal stress") for v in sigma_n_arr]
+    y = [_number(v, "Peak shear stress") for v in tau_arr]
+    if len(x) < 2 or len(x) != len(y):
+        raise ValueError("At least two matched (normal, shear) observations required.")
+    mx, my = math.fsum(x)/len(x), math.fsum(y)/len(y)
+    sxx = math.fsum((v-mx)**2 for v in x)
+    if sxx <= 0:
+        raise ValueError("Normal stress values must not all be identical.")
+    slope = math.fsum((a-mx)*(b-my) for a,b in zip(x,y))/sxx
+    c = my - slope*mx
+    phi = math.degrees(math.atan(slope))
+    ss_res = math.fsum((b-c-slope*a)**2 for a,b in zip(x,y))
+    ss_tot = math.fsum((b-my)**2 for b in y)
+    r2 = 1-ss_res/ss_tot if ss_tot > 0 else 1.0
+    return c, phi, r2
 
-    if len(sigma_n) < 2 or len(sigma_n) != len(tau):
-        raise ValueError("At least 2 matched (σ_n, τ_f) data points are required for fitting.")
 
-    n = len(sigma_n)
-    mean_x = sum(sigma_n) / n
-    mean_y = sum(tau) / n
-
-    sxx = sum((x - mean_x) ** 2 for x in sigma_n)
-    if sxx <= 0.0:
-        raise ValueError("Normal stress values σ_n must not all be identical.")
-
-    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(sigma_n, tau))
-
-    # Source: IS 2720 Part 13 / Ordinary Least Squares regression for τ = c' + σ_n tan(φ')
-    tan_phi = sxy / sxx
-    # Source: IS 2720 Part 13 / Ordinary Least Squares intercept c'
-    c_prime = mean_y - tan_phi * mean_x
-    # Source: Mohr-Coulomb failure criterion φ' = arctan(slope)
-    phi_prime_deg = math.degrees(math.atan(tan_phi))
-
-    tau_pred = [c_prime + tan_phi * x for x in sigma_n]
-    ss_res = sum((y - yp) ** 2 for y, yp in zip(tau, tau_pred))
-    ss_tot = sum((y - mean_y) ** 2 for y in tau)
-    # Source: Coefficient of determination R²
-    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 1.0
-
-    return c_prime, phi_prime_deg, r_squared
+def fit_uu_cu(sigma3: Sequence[float], deviator: Sequence[float]) -> Tuple[float, List[float]]:
+    """IS 2720 Part 11 / Mohr circle, saturated clay, φ_u=0 assumption."""
+    pressures = [_number(x, "Cell pressure") for x in sigma3]
+    devs = [_number(x, "Failure deviator stress") for x in deviator]
+    if not devs or len(pressures) != len(devs):
+        raise ValueError("At least one matched UU observation is required.")
+    values = [d/2.0 for d in devs]
+    return math.fsum(values)/len(values), values
